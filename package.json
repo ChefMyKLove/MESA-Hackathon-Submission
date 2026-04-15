@@ -11,7 +11,7 @@
     "setup": "npm install && cd dashboard && npm install",
     "keygen": "node scripts/keygen.js",
     "balance": "node scripts/balance.js",
-    "test-run": "concurrently -n RELAY,ORCH,L1,L2,L3,L4,L5,L6,L7,L8,L9,L10 -c blue,cyan,green,green,green,green,green,yellow,yellow,yellow,yellow,yellow \"node relay/server.js\" \"node --env-file=.env.orchestrator.test agents/orchestrator.js\" \"node --env-file=.env.labeler1 agents/labeler.js\" \"node --env-file=.env.labeler2 agents/labeler.js\" \"node --env-file=.env.labeler3 agents/labeler.js\" \"node --env-file=.env.labeler4 agents/labeler.js\" \"node --env-file=.env.labeler5 agents/labeler.js\" \"node --env-file=.env.labeler6 agents/labeler.js\" \"node --env-file=.env.labeler7 agents/labeler.js\" \"node --env-file=.env.labeler8 agents/labeler.js\" \"node --env-file=.env.labeler9 agents/labeler.js\" \"node --env-file=.env.labeler10 agents/labeler.js\"",
+    "test-run": "concurrently --log-output-dir logs/test-run --timestamp-format \"HH:mm:ss\" -n RELAY,ORCH,L1,L2,L3,L4,L5,L6,L7,L8,L9,L10 -c blue,cyan,green,green,green,green,green,yellow,yellow,yellow,yellow,yellow \"node relay/server.js\" \"node --env-file=.env.orchestrator.test agents/orchestrator.js\" \"node --env-file=.env.labeler1 agents/labeler.js\" \"node --env-file=.env.labeler2 agents/labeler.js\" \"node --env-file=.env.labeler3 agents/labeler.js\" \"node --env-file=.env.labeler4 agents/labeler.js\" \"node --env-file=.env.labeler5 agents/labeler.js\" \"node --env-file=.env.labeler6 agents/labeler.js\" \"node --env-file=.env.labeler7 agents/labeler.js\" \"node --env-file=.env.labeler8 agents/labeler.js\" \"node --env-file=.env.labeler9 agents/labeler.js\" \"node --env-file=.env.labeler10 agents/labeler.js\"",
     "fanout": "node scripts/fanout.js",
     "distribute": "node scripts/distribute.js",
     "relay": "node relay/server.js",
@@ -28,7 +28,7 @@
     "labeler10": "node --env-file=.env.labeler10 agents/labeler.js",
     "dashboard": "cd dashboard && npm run dev",
     "start": "concurrently -n RELAY,ORCH,L1,L2,L3,L4,L5,L6,L7,L8,L9,L10 -c blue,cyan,green,green,green,green,green,yellow,yellow,yellow,yellow,yellow \"npm run relay\" \"npm run orchestrator\" \"npm run labeler1\" \"npm run labeler2\" \"npm run labeler3\" \"npm run labeler4\" \"npm run labeler5\" \"npm run labeler6\" \"npm run labeler7\" \"npm run labeler8\" \"npm run labeler9\" \"npm run labeler10\"",
-    "start:prod": "concurrently -n ORCH,L1,L2,L3,L4,L5,L6,L7,L8,L9,L10 -c cyan,green,green,green,green,green,yellow,yellow,yellow,yellow,yellow \"npm run orchestrator\" \"npm run labeler1\" \"npm run labeler2\" \"npm run labeler3\" \"npm run labeler4\" \"npm run labeler5\" \"npm run labeler6\" \"npm run labeler7\" \"npm run labeler8\" \"npm run labeler9\" \"npm run labeler10\""
+    "start:prod": "concurrently --log-output-dir logs/prod --timestamp-format \"HH:mm:ss\" -n ORCH,L1,L2,L3,L4,L5,L6,L7,L8,L9,L10 -c cyan,green,green,green,green,green,yellow,yellow,yellow,yellow,yellow \"npm run orchestrator\" \"npm run labeler1\" \"npm run labeler2\" \"npm run labeler3\" \"npm run labeler4\" \"npm run labeler5\" \"npm run labeler6\" \"npm run labeler7\" \"npm run labeler8\" \"npm run labeler9\" \"npm run labeler10\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

@@ -14,6 +14,7 @@ dist/
 test-results.txt
 run-24h.txt
 *.log
+logs/
 
 # ── ML model cache (DistilBERT, ~67MB — download once, don't commit) ─────────
 .cache/
