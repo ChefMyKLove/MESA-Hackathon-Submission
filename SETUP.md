@@ -78,14 +78,17 @@ node scripts/balance.js
 
 Send BSV to each address:
 
-| Agent | Address | Amount needed |
-|-------|---------|---------------|
-| orchestrator | (from balance.js) | 200,000 sats (0.002 BSV) |
-| labeler1–10 | (from balance.js) | 30,000 sats each (0.0003 BSV) |
-| **TOTAL** | | **~500,000 sats ≈ $0.20** |
+| Agent | Amount needed (24h run) | Why |
+|-------|------------------------|-----|
+| orchestrator | 17,000,000 sats (0.17 BSV) | 10 sat reward + ~125 sat fee per task cycle, minus 10 sat deposits received back |
+| labeler1–10 (each) | 18,500,000 sats (0.185 BSV) | 1 sat deposit + ~125 sat fee per bid × 138k bids/24h, minus 10 sat wins |
+| **TOTAL (24h)** | **~202,000,000 sats ≈ 2.02 BSV** | |
+| **TOTAL (30h)** | **~252,000,000 sats ≈ 2.52 BSV** | |
 
-> ⚠ The orchestrator pays winners — it needs the most funds.
-> Labelers only need enough for bid deposits (1 sat) + tx fees (~95 sats each).
+Math: 1.6 tasks/sec × 86,400 sec = 138,240 cycles. Each cycle = 10 bid txs (~126 sats each) + 1 inscription (~125 sats) + 1 payment batch tx (~125 sats) = ~1,640 sats total across all wallets.
+
+> ⚠ The old "30,000 sats per labeler" figure was the startup seed only — enough for ~4 minutes of operation.
+> Use `node scripts/balance.js` to check live balances. Use `node scripts/topup.js` to rebalance between wallets.
 
 ---
 

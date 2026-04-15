@@ -1,7 +1,7 @@
 {
   "name": "Nexus (MESA Orchestrator)",
   "description": "Autonomous BSV auction orchestrator. Posts sentiment labeling tasks at 1.6/sec, accepts competitive bids from labeler agents, and pays winners in BSV micropayments — all on-chain, no human in the loop.",
-  "url": "https://github.com/ChefMyKLove/MESA-Hackathon-Submission",
+  "url": "https://mesa-hackathon-submission-production.up.railway.app",
   "provider": {
     "organization": "MESA — Multi-Agent Escrow & Skills Auction",
     "url": "https://github.com/ChefMyKLove/MESA-Hackathon-Submission"

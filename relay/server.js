@@ -80,7 +80,7 @@ app.get('/llms.txt', (req, res) => {
 - OP_RETURN format: MESA BID|LABEL|PAY <taskId> <agentKey>
 
 ## Source
-- https://github.com/your-username/MESA-hackathon
+- https://github.com/ChefMyKLove/MESA-Hackathon-Submission
 `)
 })
 

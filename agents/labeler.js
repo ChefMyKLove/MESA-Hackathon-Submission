@@ -125,11 +125,12 @@ agent.listen(BOXES.JOB_POSTINGS, async ({ sender, body }) => {
     try {
       const orchAddr = await getOrchestratorAddress()
       if (orchAddr) {
-        await walletSend(
+        const bidTxid = await walletSend(
           [{ address: orchAddr, satoshis: SATS.BID_DEPOSIT }],
           opReturnBid(taskId, agent.identityKey)
         )
         txOnChain++
+        if (txOnChain <= 3) agent.log(`⛓ BID TX #${txOnChain}: https://whatsonchain.com/tx/${bidTxid}`)
       }
     } catch (err) {
       agent.log(`⚠ Bid tx failed for ${taskId}: ${err.message}`)
@@ -192,12 +193,15 @@ let _orchAddress = null
 async function getOrchestratorAddress() {
   if (_orchAddress) return _orchAddress
   try {
+    // ORCHESTRATOR_KEY is the orchestrator's compressed PUBLIC key (66 hex chars, 02/03 prefix).
+    // addressFromPrivKey detects the 02/03 prefix and derives the address correctly.
     _orchAddress = addressFromPrivKey(process.env.ORCHESTRATOR_KEY)
-    // Note: ORCHESTRATOR_KEY is the PUBLIC key, not private key.
-    // addressFromPrivKey handles public keys too via P2PKH(pubKeyHash).
-  } catch {
-    // Can't derive address from pubkey directly — use a known address from env
+  } catch (err) {
+    agent.log(`⚠ Could not derive orchestrator address from ORCHESTRATOR_KEY: ${err.message}`)
     _orchAddress = process.env.ORCHESTRATOR_ADDRESS || null
+  }
+  if (!_orchAddress) {
+    agent.log(`⚠ Orchestrator address unavailable — bid deposits disabled. Set ORCHESTRATOR_ADDRESS in env.`)
   }
   return _orchAddress
 }

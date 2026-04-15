@@ -11,10 +11,10 @@
  * The @bsv/sdk P2PKH.unlock() accepts sourceSatoshis + lockingScript directly,
  * and calculateChange() only needs a minimal stub — both values are in our local pool.
  */
-import { PrivateKey, PublicKey, P2PKH, Transaction, Script, Utils, SatoshisPerKilobyte } from '@bsv/sdk'
+import { PrivateKey, PublicKey, P2PKH, Transaction, Script, SatoshisPerKilobyte } from '@bsv/sdk'
 
 const WOC_BASE = 'https://api.whatsonchain.com/v1/bsv/main'
-const FEE_RATE_SAT_PER_KB = 500  // 0.5 sat/byte
+const FEE_RATE_SAT_PER_KB = 500  // 0.5 sat/byte — confirmed working on BSV mainnet
 
 // ── BsvWallet ────────────────────────────────────────────────────────────────
 
@@ -133,16 +133,25 @@ export class BsvWallet {
         })
       }
 
-      // OP_RETURN data output
+      // OP_RETURN data output — built from raw hex to avoid @bsv/sdk chunk encoding quirks.
+      // OP_FALSE (00) + OP_RETURN (6a) + length byte + UTF-8 data.
+      // Data ≤75 bytes: single byte length. Data 76–255 bytes: OP_PUSHDATA1 (4c) + length byte.
       if (opReturn) {
-        const dataBytes = Utils.toArray(opReturn, 'utf8')
+        const dataBytes = Buffer.from(opReturn, 'utf8')
+        const len = dataBytes.length
+        const lenHex = len <= 75
+          ? len.toString(16).padStart(2, '0')
+          : '4c' + len.toString(16).padStart(2, '0')
+        const scriptHex = '006a' + lenHex + dataBytes.toString('hex')
         tx.addOutput({
-          lockingScript: new Script([{ op: 0 }, { op: 106 }, { data: dataBytes }]),
+          lockingScript: Script.fromHex(scriptHex),
           satoshis: 0,
         })
       }
 
-      // Change output
+      // Change output — record its index BEFORE adding so we can find it precisely later.
+      // Never rely on position assumptions (e.g. "last output") — OP_RETURN may or may not exist.
+      const changeIndex = tx.outputs.length
       tx.addOutput({
         lockingScript: new P2PKH().lock(this.address),
         change: true,
@@ -169,8 +178,8 @@ export class BsvWallet {
       this._utxos = this._utxos.filter(u =>
         !selected.some(s => s.txid === u.txid && s.vout === u.vout)
       )
-      const changeOut = tx.outputs[tx.outputs.length - 1]
-      if (changeOut.satoshis > 0) {
+      const changeOut = tx.outputs[changeIndex]
+      if (changeOut && changeOut.satoshis > 0) {
         this._utxos.push({
           txid,
           vout:     tx.outputs.length - 1,
@@ -187,6 +196,8 @@ export class BsvWallet {
       // The reset wipes phantom change UTXOs from the broken chain so subsequent
       // sends use real confirmed UTXOs again. Debounced to avoid hammering WoC.
       this._broadcast(tx).catch(err => {
+        // Use process.stderr.write to ensure visibility even when stdout is redirected
+        process.stderr.write(`\n[BROADCAST FAIL] txid=${txid.slice(0, 16)} err=${err.message}\n`)
         console.error(`[wallet] broadcast failed ${txid.slice(0, 12)}: ${err.message}`)
         if (!this._chainBroken) {
           this._chainBroken = true
@@ -214,12 +225,10 @@ export class BsvWallet {
   async _broadcast(tx) {
     const hex  = tx.toHex()
     const txid = tx.id('hex')
-    let lastErr
 
     // Build the ancestor chain for ARC's bulk endpoint.
     // ARC processes an array of txs in order — submitting [parent, child] together
     // guarantees the parent is in ARC's mempool before the child is validated.
-    // This is the root-cause fix for "Missing inputs" on chained unconfirmed txs.
     const chain = []
     for (const input of tx.inputs) {
       const parentTxid = input.sourceTXID
@@ -229,66 +238,69 @@ export class BsvWallet {
     }
     chain.push({ rawTx: hex })
 
-    // If we have a chain, use ARC's bulk /v1/txs endpoint first
-    if (chain.length > 1) {
+    // Submit to ARC (GorillaPool) AND WoC simultaneously.
+    // ARC alone is not enough — TAAL mines most BSV blocks and they pull from
+    // WoC-connected nodes. Parallel submission ensures both mining pools see
+    // every tx immediately. We consider broadcast successful if EITHER accepts.
+    const arcPromise = (async () => {
       try {
-        const resp = await fetch('https://arc.gorillapool.io/v1/txs', {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify(chain),
-        })
-        const body = await resp.text()
-        if (resp.ok) return txid
-        if (body.includes('already') || body.includes('txn-already-in-mempool')) return txid
-        // Non-200 on bulk — fall through to single-tx endpoints below
-      } catch {
-        // Network error — fall through
-      }
-    }
-
-    const ENDPOINTS = [
-      // ARC single-tx — works for confirmed inputs or if bulk failed
-      {
-        url:    'https://arc.gorillapool.io/v1/tx',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:   () => JSON.stringify({ rawTx: hex }),
-        parse:  (text) => { try { return JSON.parse(text)?.txid || txid } catch { return txid } },
-      },
-      // WoC as fallback — rate-limits under load, so keep off the hot path
-      {
-        url:    `${WOC_BASE}/tx/raw`,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:   () => JSON.stringify({ txhex: hex }),
-        parse:  (text) => text.replace(/"/g, '').trim(),
-      },
-    ]
-
-    for (const endpoint of ENDPOINTS) {
-      for (let i = 0; i < 3; i++) {
-        try {
-          const resp = await fetch(endpoint.url, {
-            method:  endpoint.method,
-            headers: endpoint.headers,
-            body:    endpoint.body(),
+        // Use bulk endpoint for chains, single for standalone txs
+        if (chain.length > 1) {
+          const resp = await fetch('https://arc.gorillapool.io/v1/txs', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify(chain),
           })
           const body = await resp.text()
-
-          if (resp.ok) return endpoint.parse(body)
-          if (body.includes('already') || body.includes('txn-already-in-mempool')) return txid
-          if (resp.status === 429) { await sleep(1000 * (i + 1)); continue }
-
-          lastErr = new Error(`Broadcast failed (${resp.status}): ${body.slice(0, 100)}`)
-          break
-        } catch (err) {
-          lastErr = err
-          await sleep(500)
+          if (resp.ok) return true
+          if (body.includes('already') || body.includes('txn-already-in-mempool')) return true
         }
+        // Single-tx endpoint (first tx in chain or bulk fallback)
+        const resp = await fetch('https://arc.gorillapool.io/v1/tx', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ rawTx: hex }),
+        })
+        const body = await resp.text()
+        if (resp.ok) return true
+        if (body.includes('already') || body.includes('txn-already-in-mempool')) return true
+        return false
+      } catch {
+        return false
       }
-    }
+    })()
 
-    throw lastErr ?? new Error('Broadcast failed on all endpoints')
+    const wocPromise = (async () => {
+      try {
+        const resp = await fetch(`${WOC_BASE}/tx/raw`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ txhex: hex }),
+        })
+        const body = await resp.text()
+        if (resp.ok) return true
+        if (body.includes('already') || body.includes('txn-already-in-mempool')) return true
+        // WoC 429 — back off and retry once
+        if (resp.status === 429) {
+          await sleep(1000)
+          const r2 = await fetch(`${WOC_BASE}/tx/raw`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ txhex: hex }),
+          })
+          return r2.ok
+        }
+        return false
+      } catch {
+        return false
+      }
+    })()
+
+    const [arcOk, wocOk] = await Promise.all([arcPromise, wocPromise])
+
+    if (arcOk || wocOk) return txid
+
+    throw new Error(`Broadcast failed on all endpoints (arc=${arcOk} woc=${wocOk})`)
   }
 
   balance() {

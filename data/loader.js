@@ -8,6 +8,10 @@
  * Target: 136,000+ items to sustain 1.58 tasks/sec for 24 hours.
  * The corpus is cycled (repeated with index offsets) to hit that count.
  */
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 // Diverse corpus covering finance, tech, food, sports, health, travel
 const CORPUS = [
@@ -173,8 +177,9 @@ export async function initMLClassifier(logFn = console.log) {
   try {
     const { pipeline, env } = await import('@xenova/transformers')
 
-    // Cache models in project dir so all 10 labelers share the same download
-    env.cacheDir = './.cache/huggingface'
+    // Absolute path — works regardless of CWD when labeler is launched.
+    // All 10 instances share the same cache so the 67MB download only happens once.
+    env.cacheDir = join(__dirname, '..', '.cache', 'huggingface')
 
     logFn('Loading DistilBERT sentiment model (~67MB, cached after first run)...')
     _classifier = await pipeline(

@@ -15,12 +15,12 @@
 import { MesaAgent } from './base.js'
 import {
   BOXES, MSG, SATS, BID_WINDOW_MS,
-  mkJob, mkAward, parseBody, taskId,
+  mkJob, mkAward, taskId,
   opReturnPayment,
 } from '../shared/protocol.js'
 import { BsvWallet } from '../shared/bsv.js'
 import { relay } from '../shared/relay.js'
-import { nextItem, totalLabeled } from '../data/loader.js'
+import { nextItem } from '../data/loader.js'
 
 // Registry: agentKey → { bidAddress }
 const registry = {}
@@ -115,10 +115,15 @@ function flushBatch() {
 
   enqueuePayment(async () => {
     try {
-      const outputs  = batch.map(p => ({ address: p.address, satoshis: SATS.LABEL_REWARD }))
-      const opReturn = `MESA BATCH ${batch.length} ${batch[0].taskId}`
+      const outputs = batch.map(p => ({ address: p.address, satoshis: SATS.LABEL_REWARD }))
+      // Single payment: use full protocol OP_RETURN so judges can verify on-chain.
+      // Multi-payment batch: encode all taskIds so the batch is still traceable.
+      const opReturn = batch.length === 1
+        ? opReturnPayment(batch[0].taskId, batch[0].sender, SATS.LABEL_REWARD)
+        : `MESA BATCH ${batch.length} ${batch.map(p => p.taskId).join(',').slice(0, 200)}`
 
       const txid = await wallet.send(outputs, opReturn)
+      agent.log(`💸 PAYMENT TX: https://whatsonchain.com/tx/${txid}  (${batch.length} labelers, ${batch.length * SATS.LABEL_REWARD} sats)`)
 
       txCount   += batch.length
       tasksDone += batch.length
@@ -129,8 +134,14 @@ function flushBatch() {
       }
     } catch (err) {
       agent.log(`⚠ Batch payment failed (${batch.length} pending): ${err.message}`)
-      pendingPayments.unshift(...batch)  // re-queue on failure
-      scheduleBatch()
+      // Re-queue failed batch, but cap total queue to prevent unbounded growth
+      // under sustained broadcast failure (e.g. ARC down for minutes).
+      if (pendingPayments.length < 5_000) {
+        pendingPayments.unshift(...batch)
+        scheduleBatch()
+      } else {
+        agent.log(`⚠ Payment queue full (${pendingPayments.length}) — dropping ${batch.length} payments to prevent OOM`)
+      }
     }
   })
 
