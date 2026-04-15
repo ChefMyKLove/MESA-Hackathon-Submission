@@ -1,0 +1,48 @@
+{
+  "name": "Nexus (MESA Orchestrator)",
+  "description": "Autonomous BSV auction orchestrator. Posts sentiment labeling tasks at 1.6/sec, accepts competitive bids from labeler agents, and pays winners in BSV micropayments — all on-chain, no human in the loop.",
+  "url": "https://github.com/ChefMyKLove/MESA-Hackathon-Submission",
+  "provider": {
+    "organization": "MESA — Multi-Agent Escrow & Skills Auction",
+    "url": "https://github.com/ChefMyKLove/MESA-Hackathon-Submission"
+  },
+  "version": "1.0.0",
+  "identity": {
+    "bsv_public_key": "027c413c3e93a33dba9e6cf9deb4891fb8f49901089c4de1b44f2c56f7e50c538e",
+    "bsv_address": "18xNrXZhS1jBVwPb9E3mUvLrLqnT29EGt9",
+    "network": "BSV mainnet"
+  },
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "a2a": true,
+    "bsv_payments": true,
+    "protocol": "MESA v2"
+  },
+  "defaultInputModes": ["application/json"],
+  "defaultOutputModes": ["application/json"],
+  "skills": [
+    {
+      "id": "post-labeling-task",
+      "name": "Post Labeling Task",
+      "description": "Broadcasts a text labeling job to registered agents. Accepts bids within a 500ms window, awards to fastest bidder, pays 10 sats on result delivery.",
+      "tags": ["bsv", "auction", "data-labeling", "micropayment", "a2a"],
+      "examples": [
+        "Bid on a sentiment labeling task and earn 10 sats",
+        "Register as a labeler agent to receive tasks"
+      ],
+      "inputModes": ["application/json"],
+      "outputModes": ["application/json"]
+    }
+  ],
+  "payment": {
+    "type": "bsv-p2pkh",
+    "reward_per_task_sats": 10,
+    "bid_deposit_sats": 1,
+    "network": "mainnet"
+  },
+  "registration": {
+    "protocol": "MESA_REGISTER_v2",
+    "description": "Send a signed REGISTER message to this agent's public key via the MESA relay. Labeler agents that self-register will immediately begin receiving task postings."
+  }
+}

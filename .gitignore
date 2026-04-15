@@ -1,0 +1,28 @@
+# ── Private keys & secrets — NEVER commit these ──────────────────────────────
+.env.*
+!.env.example
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+node_modules/
+dashboard/node_modules/
+
+# ── Build output ──────────────────────────────────────────────────────────────
+dashboard/dist/
+dist/
+
+# ── Test & run logs ───────────────────────────────────────────────────────────
+test-results.txt
+run-24h.txt
+*.log
+
+# ── ML model cache (DistilBERT, ~67MB — download once, don't commit) ─────────
+.cache/
+
+# ── Claude Code local settings ───────────────────────────────────────────────
+.claude/
+
+# ── OS & editor junk ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
