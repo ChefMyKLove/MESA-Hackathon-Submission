@@ -16,6 +16,7 @@ function connect() {
 
     _ws.on('open', () => {
       _connected = true
+      console.log(`[relay] connected to ${RELAY_URL}`)
       // Identify as publisher
       _ws.send(JSON.stringify({ role: 'publisher' }))
       // Flush queued events
@@ -23,18 +24,18 @@ function connect() {
       _queue = []
     })
 
-    _ws.on('close', () => {
+    _ws.on('close', (code, reason) => {
       _connected = false
       _ws = null
+      console.log(`[relay] disconnected (code=${code}) — reconnecting in 3s...`)
       // Reconnect after 3s
       setTimeout(connect, 3000)
     })
 
-    // Node.js v24 throws AggregateError (bundled IPv4+IPv6 ECONNREFUSED) that
-    // can bypass older error listeners — nullify _ws silently here too.
-    _ws.on('error', () => {
+    _ws.on('error', (err) => {
       _connected = false
       _ws = null
+      console.error(`[relay] connection error: ${err.message}`)
     })
   } catch {
     _ws = null
