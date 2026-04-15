@@ -27,7 +27,8 @@
     "labeler9": "node --env-file=.env.labeler9  agents/labeler.js",
     "labeler10": "node --env-file=.env.labeler10 agents/labeler.js",
     "dashboard": "cd dashboard && npm run dev",
-    "start": "concurrently -n RELAY,ORCH,L1,L2,L3,L4,L5,L6,L7,L8,L9,L10 -c blue,cyan,green,green,green,green,green,yellow,yellow,yellow,yellow,yellow \"npm run relay\" \"npm run orchestrator\" \"npm run labeler1\" \"npm run labeler2\" \"npm run labeler3\" \"npm run labeler4\" \"npm run labeler5\" \"npm run labeler6\" \"npm run labeler7\" \"npm run labeler8\" \"npm run labeler9\" \"npm run labeler10\""
+    "start": "concurrently -n RELAY,ORCH,L1,L2,L3,L4,L5,L6,L7,L8,L9,L10 -c blue,cyan,green,green,green,green,green,yellow,yellow,yellow,yellow,yellow \"npm run relay\" \"npm run orchestrator\" \"npm run labeler1\" \"npm run labeler2\" \"npm run labeler3\" \"npm run labeler4\" \"npm run labeler5\" \"npm run labeler6\" \"npm run labeler7\" \"npm run labeler8\" \"npm run labeler9\" \"npm run labeler10\"",
+    "start:prod": "concurrently -n ORCH,L1,L2,L3,L4,L5,L6,L7,L8,L9,L10 -c cyan,green,green,green,green,green,yellow,yellow,yellow,yellow,yellow \"npm run orchestrator\" \"npm run labeler1\" \"npm run labeler2\" \"npm run labeler3\" \"npm run labeler4\" \"npm run labeler5\" \"npm run labeler6\" \"npm run labeler7\" \"npm run labeler8\" \"npm run labeler9\" \"npm run labeler10\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

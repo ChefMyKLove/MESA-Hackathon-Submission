@@ -24,7 +24,7 @@ export default function App() {
   const onlineCount  = agentList.filter(a => a.online).length
   const isConnected  = onlineCount > 0
   const TARGET_TX_DAY = 1_500_000
-  const progress     = Math.min(100, (projection24h / TARGET_TX_DAY) * 100).toFixed(0)
+  const progress     = Math.min(100, (totalTxs / TARGET_TX_DAY) * 100).toFixed(1)
 
   return (
     <div style={styles.root}>
@@ -63,7 +63,7 @@ export default function App() {
           <Stat label="Sats Paid"      value={totalSatsPaid.toLocaleString()}  color="var(--green)"   />
 
           <div style={styles.targetWrap}>
-            <div style={styles.targetLabel}>{progress}% of 1.5M target</div>
+            <div style={styles.targetLabel}>{progress}% of 1.5M txs</div>
             <div style={styles.barBg}>
               <div style={{
                 ...styles.barFill,
@@ -84,7 +84,7 @@ export default function App() {
       {activeTab === 'overview' && (
         <main style={styles.main}>
           <div style={styles.leftCol}>
-            <Section title={`Agents (${onlineCount}/11)`} accent="var(--accent)" grow={false}>
+            <Section title={`Agents (${onlineCount}/11)`} accent="var(--accent)" grow={false} hint="click a card for details">
               <AgentGrid agents={agentList} cycles={cycles} />
             </Section>
             <Section title="Labeled Results" accent="var(--green)">
@@ -129,12 +129,13 @@ function Tab({ label, active, onClick, accent = 'var(--accent)' }) {
   )
 }
 
-function Section({ title, accent, children, grow = true }) {
+function Section({ title, accent, children, grow = true, hint }) {
   return (
     <div style={{ ...styles.section, ...(grow ? styles.sectionGrow : {}) }}>
       <div style={styles.sectionHeader}>
         <div style={{ ...styles.sectionDot, background: accent }} />
         <span style={styles.sectionTitle}>{title}</span>
+        {hint && <span style={styles.sectionHint}>{hint}</span>}
       </div>
       <div style={styles.sectionBody}>{children}</div>
     </div>
@@ -215,6 +216,10 @@ const styles = {
   sectionTitle: {
     fontSize: 10, fontWeight: 600,
     textTransform: 'uppercase', letterSpacing: 1, color: 'var(--muted)',
+  },
+  sectionHint: {
+    fontSize: 9, color: 'var(--accent)', fontStyle: 'italic',
+    marginLeft: 6, opacity: 0.8,
   },
   sectionBody: { flex: 1, overflow: 'hidden', padding: 10 },
 
