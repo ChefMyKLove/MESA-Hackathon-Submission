@@ -26,9 +26,18 @@ console.log(`  Amount: ${AMOUNT.toLocaleString()} sats\n`)
 
 // Fetch UTXOs
 console.log('① Fetching UTXOs...')
-const resp = await fetch(`${WOC}/address/${address}/unspent`)
-if (!resp.ok) { console.error('WoC fetch failed:', resp.status); process.exit(1) }
-const all = await resp.json()
+let all
+for (let attempt = 1; attempt <= 10; attempt++) {
+  const resp = await fetch(`${WOC}/address/${address}/unspent`)
+  if (resp.ok) { all = await resp.json(); break }
+  if (resp.status === 429) {
+    console.log(`   WoC rate limited, retrying in ${attempt * 2}s... (attempt ${attempt}/10)`)
+    await new Promise(r => setTimeout(r, attempt * 2000))
+    continue
+  }
+  console.error('WoC fetch failed:', resp.status); process.exit(1)
+}
+if (!all) { console.error('WoC rate limited after 10 retries'); process.exit(1) }
 
 const usable = all.sort((a, b) => b.value - a.value)
 const totalAvailable = usable.reduce((s, u) => s + u.value, 0)
