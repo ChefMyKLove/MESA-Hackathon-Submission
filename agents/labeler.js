@@ -125,8 +125,11 @@ agent.listen(BOXES.JOB_POSTINGS, async ({ sender, body }) => {
     try {
       const orchAddr = await getOrchestratorAddress()
       if (orchAddr) {
+        // Send bid deposit to self (not orchestrator) to prevent dust UTXO
+        // accumulation on the orchestrator address. The bid is still proven
+        // on-chain via the OP_RETURN — orchAddr only used for verification.
         const bidTxid = await walletSend(
-          [{ address: orchAddr, satoshis: SATS.BID_DEPOSIT }],
+          [{ address: wallet.address_str, satoshis: SATS.BID_DEPOSIT }],
           opReturnBid(taskId, agent.identityKey)
         )
         txOnChain++
