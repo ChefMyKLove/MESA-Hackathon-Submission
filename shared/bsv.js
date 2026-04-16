@@ -14,7 +14,7 @@
 import { PrivateKey, PublicKey, P2PKH, Transaction, Script, SatoshisPerKilobyte } from '@bsv/sdk'
 
 const WOC_BASE = 'https://api.whatsonchain.com/v1/bsv/main'
-const FEE_RATE_SAT_PER_KB = 110  // 0.11 sat/byte — confirmed next-block rate on BSV mainnet
+const FEE_RATE_SAT_PER_KB = 200  // 0.2 sat/byte — reliable next-block confirmation on BSV mainnet
 
 // ── BsvWallet ────────────────────────────────────────────────────────────────
 

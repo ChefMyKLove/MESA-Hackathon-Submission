@@ -8,7 +8,7 @@ import { PrivateKey, P2PKH, Transaction, Script, SatoshisPerKilobyte } from '@bs
 
 const WOC = 'https://api.whatsonchain.com/v1/bsv/main'
 const ARC = 'https://arc.gorillapool.io/v1/tx'
-const FEE_RATE = 110  // sat/KB
+const FEE_RATE = 200  // sat/KB
 
 const ORCH_ADDR = '18xNrXZhS1jBVwPb9E3mUvLrLqnT29EGt9'
 const AMOUNT   = 50_000_000  // 0.5 BSV
