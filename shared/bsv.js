@@ -218,6 +218,21 @@ export class BsvWallet {
 
     } catch (err) {
       this._unlock(selected)
+      // If we ran out of funds, force a WoC refresh — a topup may have arrived
+      // that the local pool doesn't know about yet. This auto-recovers without restart.
+      if (err.message.startsWith('Insufficient funds') && !this._chainBroken) {
+        this._chainBroken = true
+        setTimeout(async () => {
+          try {
+            await this.refreshUtxos(true)
+            console.error(`[wallet] UTXO pool refreshed after insufficient funds — ${this._utxos.length} UTXOs restored`)
+          } catch (e) {
+            console.error(`[wallet] UTXO refresh failed: ${e.message}`)
+          } finally {
+            this._chainBroken = false
+          }
+        }, 5000)  // 5s debounce — don't hammer WoC on every retry
+      }
       throw err
     }
   }

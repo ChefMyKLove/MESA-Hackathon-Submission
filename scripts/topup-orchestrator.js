@@ -11,7 +11,7 @@ const ARC = 'https://arc.gorillapool.io/v1/tx'
 const FEE_RATE = 200  // sat/KB
 
 const ORCH_ADDR = '18xNrXZhS1jBVwPb9E3mUvLrLqnT29EGt9'
-const AMOUNT   = 50_000_000  // 0.5 BSV
+const AMOUNT   = 20_000_000  // 0.2 BSV
 
 const KEY = process.env.AGENT_KEY
 if (!KEY) { console.error('Usage: node --env-file=.env.labeler7 scripts/topup-orchestrator.js'); process.exit(1) }
@@ -97,7 +97,7 @@ const [arcResult, wocResult] = await Promise.allSettled([
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txhex: hex }),
-  }).then(r => r.text()).then(body => ({ ok: r?.status < 300 || body.includes('already'), body })).catch(e => ({ ok: false, body: e.message })),
+  }).then(async r => { const body = await r.text(); return { ok: r.status < 300 || body.includes('already'), body } }).catch(e => ({ ok: false, body: e.message })),
 ])
 
 const arc = arcResult.value
