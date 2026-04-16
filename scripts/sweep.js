@@ -54,10 +54,11 @@ if (all.length === 0) {
   process.exit(0)
 }
 
-// Prefer confirmed UTXOs for a clean double-spend.
-// Fall back to mempool UTXOs if nothing confirmed (CPFP attempt).
-const utxos = confirmed.length > 0 ? confirmed : mempool
-const mode  = confirmed.length > 0 ? 'DOUBLE-SPEND (invalidates stuck txs)' : 'CPFP (chains off mempool)'
+// Use ALL UTXOs (confirmed + mempool) sorted by value descending.
+// This ensures a large unconfirmed topup is included alongside confirmed dust,
+// giving enough balance to cover the consolidation fee.
+const utxos = [...all].sort((a, b) => b.value - a.value)
+const mode  = confirmed.length > 0 ? 'CONSOLIDATE (confirmed + mempool)' : 'CPFP (chains off mempool)'
 
 console.log(`\n   Mode: ${mode}`)
 utxos.forEach(u => {

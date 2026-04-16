@@ -237,20 +237,29 @@ loop()
 
 // ── Stats logger (every 10 seconds) ──────────────────────────────────────────
 
-setInterval(() => {
+setInterval(async () => {
   const elapsed = (Date.now() - startTime) / 1000
   const txPerSec = (txCount / elapsed).toFixed(2)
   const projected24h = Math.round(txCount / elapsed * 86400)
+  const utxoCount = wallet._utxos.length
 
   agent.log(
     `📊 ${tasksPosted} posted | ${tasksDone} done | ${txCount} on-chain tx | ` +
     `${txPerSec} tx/sec | proj 24h: ${projected24h.toLocaleString()} | ` +
-    `balance: ${wallet.balance()} sats`
+    `balance: ${wallet.balance()} sats | UTXOs: ${utxoCount}`
   )
 
   relay.log('orchestrator',
     `tx/sec: ${txPerSec} | 24h proj: ${projected24h.toLocaleString()} | done: ${tasksDone}`
   )
+
+  // Auto-consolidate if dust accumulation is getting out of hand.
+  // Threshold 150: fires before the wallet has enough dust to cause broadcast failures.
+  if (utxoCount > 150) {
+    wallet.consolidateIfNeeded(150).catch(err =>
+      agent.log(`⚠ consolidation error: ${err.message}`)
+    )
+  }
 }, 10_000)
 
 // ── Test mode: auto-stop after TEST_DURATION_MS ───────────────────────────────

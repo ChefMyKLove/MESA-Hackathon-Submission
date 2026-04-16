@@ -14,7 +14,7 @@
 import { PrivateKey, PublicKey, P2PKH, Transaction, Script, SatoshisPerKilobyte } from '@bsv/sdk'
 
 const WOC_BASE = 'https://api.whatsonchain.com/v1/bsv/main'
-const FEE_RATE_SAT_PER_KB = 500  // 0.5 sat/byte — confirmed working on BSV mainnet
+const FEE_RATE_SAT_PER_KB = 110  // 0.11 sat/byte — confirmed next-block rate on BSV mainnet
 
 // ── BsvWallet ────────────────────────────────────────────────────────────────
 
@@ -307,6 +307,101 @@ export class BsvWallet {
     return this._utxos
       .filter(u => !this._locked.has(u.txid + ':' + u.vout))
       .reduce((s, u) => s + u.satoshis, 0)
+  }
+
+  /**
+   * Consolidate UTXOs if count exceeds threshold — called periodically by the orchestrator.
+   * Merges all unlocked UTXOs into a single output back to self.
+   * Fire-and-forget: updates local pool immediately, broadcasts in background.
+   *
+   * @param {number} threshold  - trigger when unlocked UTXO count exceeds this (default 200)
+   * @param {number} maxInputs  - max inputs per consolidation tx to keep size manageable
+   * @returns {string|null}     - txid if consolidation fired, null if not needed
+   */
+  async consolidateIfNeeded(threshold = 200, maxInputs = 400) {
+    const available = this._utxos.filter(u => !this._locked.has(u.txid + ':' + u.vout))
+    if (available.length <= threshold) return null
+
+    // Take up to maxInputs (largest first so we preserve the most value per tx)
+    const toConsolidate = available.sort((a, b) => b.satoshis - a.satoshis).slice(0, maxInputs)
+    const total = toConsolidate.reduce((s, u) => s + u.satoshis, 0)
+
+    console.log(`[wallet] auto-consolidate: ${available.length} UTXOs → merging ${toConsolidate.length} (${total} sats)`)
+
+    const myScript = this._myScript ?? new P2PKH().lock(this.address)
+
+    // Lock all inputs for the duration of the build
+    for (const u of toConsolidate) this._locked.add(u.txid + ':' + u.vout)
+
+    try {
+      const tx = new Transaction()
+
+      for (const u of toConsolidate) {
+        const srcStub = { outputs: [] }
+        srcStub.outputs[u.vout] = { satoshis: u.satoshis }
+        tx.addInput({
+          sourceTXID:              u.txid,
+          sourceOutputIndex:       u.vout,
+          sequence:                0xffffffff,
+          sourceTransaction:       srcStub,
+          unlockingScriptTemplate: new P2PKH().unlock(
+            this.privKey, 'all', false, u.satoshis, myScript
+          ),
+        })
+      }
+
+      tx.addOutput({ lockingScript: new P2PKH().lock(this.address), change: true })
+
+      await tx.fee(new SatoshisPerKilobyte(FEE_RATE_SAT_PER_KB))
+      await tx.sign()
+
+      const txid    = tx.id('hex')
+      const outSats = tx.outputs[0]?.satoshis ?? 0
+
+      if (outSats <= 0) {
+        // Fee exceeded total — dust is worthless, just drop it from pool
+        this._utxos = this._utxos.filter(u =>
+          !toConsolidate.some(c => c.txid === u.txid && c.vout === u.vout)
+        )
+        this._unlock(toConsolidate)
+        console.log(`[wallet] auto-consolidate: dust worthless after fee — dropped ${toConsolidate.length} UTXOs`)
+        return null
+      }
+
+      // Update local pool before broadcast (same pattern as send())
+      this._utxos = this._utxos.filter(u =>
+        !toConsolidate.some(c => c.txid === u.txid && c.vout === u.vout)
+      )
+      this._utxos.push({ txid, vout: 0, satoshis: outSats, script: myScript.toHex() })
+      this._unlock(toConsolidate)
+
+      this._recentTxHex.set(txid, tx.toHex())
+      if (this._recentTxHex.size > 100) {
+        this._recentTxHex.delete(this._recentTxHex.keys().next().value)
+      }
+
+      const remaining = this._utxos.filter(u => !this._locked.has(u.txid + ':' + u.vout)).length
+      console.log(`[wallet] auto-consolidate complete: ${txid.slice(0, 16)}…  ${outSats} sats  (${remaining} UTXOs remaining)`)
+
+      this._broadcast(tx).catch(err => {
+        console.error(`[wallet] consolidation broadcast failed: ${err.message}`)
+        if (!this._chainBroken) {
+          this._chainBroken = true
+          setTimeout(async () => {
+            try { await this.refreshUtxos(true) }
+            catch (e) { console.error(`[wallet] UTXO reset failed: ${e.message}`) }
+            finally   { this._chainBroken = false }
+          }, 2000)
+        }
+      })
+
+      return txid
+
+    } catch (err) {
+      this._unlock(toConsolidate)
+      console.error(`[wallet] auto-consolidate failed: ${err.message}`)
+      return null
+    }
   }
 }
 
