@@ -11,7 +11,7 @@ const ARC = 'https://arc.gorillapool.io/v1/tx'
 const FEE_RATE = 200  // sat/KB
 
 const ORCH_ADDR = '1CXWMmLfqF68jHtLiUGcm4hYW5Me75CUaX'  // new orchestrator
-const AMOUNT   = 20_000_000  // 0.2 BSV
+const AMOUNT   = 10_000_000  // 0.1 BSV
 
 const KEY = process.env.AGENT_KEY
 if (!KEY) { console.error('Usage: node --env-file=.env.labeler7 scripts/topup-orchestrator.js'); process.exit(1) }
