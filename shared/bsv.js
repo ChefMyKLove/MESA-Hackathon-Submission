@@ -328,6 +328,10 @@ export class BsvWallet {
     // ARC alone is not enough — TAAL mines most BSV blocks and they pull from
     // WoC-connected nodes. Parallel submission ensures both mining pools see
     // every tx immediately. We consider broadcast successful if EITHER accepts.
+    //
+    // CRITICAL: every fetch gets a 25s timeout via AbortSignal.timeout().
+    // Without this, a hung ARC/WoC connection deadlocks the wallet queue forever —
+    // the promise never resolves, all subsequent sends pile up, nothing moves.
     const arcPromise = (async () => {
       try {
         // Use bulk endpoint for chains, single for standalone txs
@@ -336,6 +340,7 @@ export class BsvWallet {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify(chain),
+            signal:  AbortSignal.timeout(25_000),
           })
           const body = await resp.text()
           if (resp.ok) return true
@@ -346,6 +351,7 @@ export class BsvWallet {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({ rawTx: hex }),
+          signal:  AbortSignal.timeout(25_000),
         })
         const body = await resp.text()
         if (resp.ok) return true
@@ -362,6 +368,7 @@ export class BsvWallet {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({ txhex: hex }),
+          signal:  AbortSignal.timeout(25_000),
         })
         const body = await resp.text()
         if (resp.ok) return true
@@ -373,6 +380,7 @@ export class BsvWallet {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ txhex: hex }),
+            signal:  AbortSignal.timeout(25_000),
           })
           return r2.ok
         }
