@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync } from 'fs'
 const WOC      = 'https://api.whatsonchain.com/v1/bsv/main'
 const ARC      = 'https://arc.gorillapool.io/v1/tx'
 const FEE_RATE = 200
-const TARGET   = 20_000_000   // sats per labeler
+const TARGET   = 15_000_000   // sats per labeler (lowered from 20M — orchestrator has 68M for 10 wallets)
 const DUST_THRESHOLD = 900    // if /unspent returns this many UTXOs, wallet has the dust problem
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -52,21 +52,70 @@ async function wocGet(path) {
   throw new Error('WoC rate limited')
 }
 
-async function blockchairLargeUtxos(address, minSats = 100_000) {
-  const utxos = []
-  const url = `https://api.blockchair.com/bitcoin-sv/outputs` +
-    `?q=recipient(${address}),is_spent(false)&s=value(desc)&limit=50&offset=0`
-  for (let i = 1; i <= 5; i++) {
-    const r = await fetch(url)
+async function findLargeUtxos(address, minSats = 100_000) {
+  // GorillaPool — no UTXO cap, BSV-native, primary choice
+  try {
+    console.log(`   Trying GorillaPool...`)
+    const r = await fetch(`https://v3.ordinals.gorillapool.io/utxos/${address}?limit=1000&offset=0&bsv20=false`)
     if (r.ok) {
       const data = await r.json()
-      const rows = data?.data ?? []
-      utxos.push(...rows.filter(u => u.value >= minSats))
-      break
+      const rows = Array.isArray(data) ? data : (data?.utxos ?? data?.data ?? [])
+      const large = rows
+        .filter(u => (u.satoshis ?? u.value ?? u.amt ?? 0) >= minSats)
+        .map(u => ({
+          transaction_hash: u.txid ?? u.tx_hash ?? u.txHash,
+          index:            u.vout ?? u.tx_pos ?? u.outputIndex ?? 0,
+          value:            u.satoshis ?? u.value ?? u.amt,
+        }))
+      if (large.length > 0) { console.log(`   → GorillaPool: ${large.length} large UTXOs`); return large }
+      console.log(`   → GorillaPool: 0 large UTXOs (total rows: ${rows.length})`)
+    } else { console.log(`   → GorillaPool: HTTP ${r.status}`) }
+  } catch (e) { console.log(`   → GorillaPool: ${e.message}`) }
+
+  await sleep(500)
+
+  // Blockchair — fallback
+  try {
+    console.log(`   Trying Blockchair...`)
+    const url = `https://api.blockchair.com/bitcoin-sv/outputs` +
+      `?q=recipient(${address}),is_spent(false)&s=value(desc)&limit=50&offset=0`
+    for (let i = 1; i <= 3; i++) {
+      const r = await fetch(url)
+      if (r.ok) {
+        const data = await r.json()
+        const rows = data?.data ?? []
+        const large = rows.filter(u => u.value >= minSats)
+        if (large.length > 0) { console.log(`   → Blockchair: ${large.length} large UTXOs`); return large }
+        console.log(`   → Blockchair: 0 large UTXOs (total rows: ${rows.length})`)
+        break
+      }
+      if (r.status === 429) { await sleep(i * 3000); continue }
+      console.log(`   → Blockchair: HTTP ${r.status}`); break
     }
-    if (r.status === 429) { await sleep(i * 3000); continue }
-  }
-  return utxos
+  } catch (e) { console.log(`   → Blockchair: ${e.message}`) }
+
+  await sleep(500)
+
+  // Bitails — last resort
+  try {
+    console.log(`   Trying Bitails...`)
+    const r = await fetch(`https://api.bitails.io/address/${address}/unspent?limit=100&offset=0`)
+    if (r.ok) {
+      const data = await r.json()
+      const rows = Array.isArray(data) ? data : (data?.unspent ?? data?.utxos ?? [])
+      const large = rows
+        .filter(u => (u.satoshis ?? u.value ?? 0) >= minSats)
+        .map(u => ({
+          transaction_hash: u.txid ?? u.tx_hash,
+          index:            u.vout ?? u.tx_pos ?? u.n ?? 0,
+          value:            u.satoshis ?? u.value,
+        }))
+      if (large.length > 0) { console.log(`   → Bitails: ${large.length} large UTXOs`); return large }
+      console.log(`   → Bitails: 0 large UTXOs`)
+    } else { console.log(`   → Bitails: HTTP ${r.status}`) }
+  } catch (e) { console.log(`   → Bitails: ${e.message}`) }
+
+  return []
 }
 
 async function broadcast(hex) {
@@ -125,7 +174,7 @@ for (let n = 1; n <= 10; n++) {
 
   labelers.push({ n, file, key, priv, addr, total, unspentCount, unspentTotal, hasDustProblem })
 
-  const flag = total >= TARGET ? '✓' : (hasDustProblem ? '⚠ DUST PROBLEM' : '↑ NEEDS TOPUP')
+  const flag = hasDustProblem ? '⚠ DUST PROBLEM' : (total >= TARGET ? '✓' : '↑ NEEDS TOPUP')
   console.log(`  L${String(n).padStart(2)} ${addr}`)
   console.log(`      confirmed: ${total.toLocaleString().padStart(14)} sats  /unspent: ${unspentCount} UTXOs = ${unspentTotal.toLocaleString()} sats  ${flag}`)
 }
@@ -139,7 +188,7 @@ for (const w of labelers) {
   console.log(`\n🔧 Fixing L${w.n} dust UTXO problem...`)
 
   // Find large UTXOs via Blockchair
-  const largeUtxos = await blockchairLargeUtxos(w.addr)
+  const largeUtxos = await findLargeUtxos(w.addr)
   if (largeUtxos.length === 0) {
     console.log(`   No large confirmed UTXOs found for L${w.n} — may still be unconfirmed. Skipping.`)
     continue
@@ -207,21 +256,34 @@ if (needTopup.length === 0) {
   let orchUtxos = await wocGet(`/address/${orchAddr}/unspent`)
   orchUtxos = orchUtxos.sort((a, b) => b.value - a.value)
 
+  const orchVisible = orchUtxos.reduce((s,u)=>s+u.value,0)
   const totalNeeded = needTopup.reduce((s, w) => s + (TARGET - w.total), 0)
-  console.log(`   Need: ${totalNeeded.toLocaleString()} sats  |  Available in /unspent: ${orchUtxos.reduce((s,u)=>s+u.value,0).toLocaleString()} sats`)
+  console.log(`   Need: ${totalNeeded.toLocaleString()} sats  |  Available in /unspent: ${orchVisible.toLocaleString()} sats`)
 
-  if (orchUtxos.reduce((s,u)=>s+u.value,0) < totalNeeded) {
-    console.error('   ✗ Not enough confirmed orchestrator UTXOs visible. Wait longer for chain to confirm and retry.')
+  const orchBudget = orchVisible - 300_000  // keep 300k in orchestrator
+  if (orchBudget <= 0) {
+    console.error('   ✗ No orchestrator UTXOs visible — check chain confirmation and retry.')
     process.exit(1)
   }
 
+  // Scale down proportionally if orchestrator can't fully fund everyone
+  const topupAmts = new Map()
+  if (orchBudget < totalNeeded) {
+    console.log(`   ⚠ Orchestrator short by ${(totalNeeded - orchBudget).toLocaleString()} sats — scaling proportionally`)
+    const scale = orchBudget / totalNeeded
+    for (const w of needTopup) topupAmts.set(w.n, Math.floor((TARGET - w.total) * scale))
+  } else {
+    for (const w of needTopup) topupAmts.set(w.n, TARGET - w.total)
+  }
+
   // Select enough orchestrator UTXOs
+  const actualNeeded = [...topupAmts.values()].reduce((s,v)=>s+v,0)
   const selected = []
   let inputTotal = 0
   for (const u of orchUtxos) {
     selected.push(u)
     inputTotal += u.value
-    if (inputTotal >= totalNeeded + 200_000) break
+    if (inputTotal >= actualNeeded + 200_000) break
   }
 
   const orchScript = new P2PKH().lock(orchAddr)
@@ -240,7 +302,7 @@ if (needTopup.length === 0) {
   }
 
   for (const w of needTopup) {
-    const topupAmt = TARGET - w.total
+    const topupAmt = topupAmts.get(w.n)
     tx.addOutput({ lockingScript: new P2PKH().lock(w.addr), satoshis: topupAmt })
     console.log(`   L${w.n}: +${topupAmt.toLocaleString()} sats → ${w.addr}`)
   }

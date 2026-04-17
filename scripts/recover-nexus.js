@@ -58,39 +58,76 @@ if (confirmed < 10_000) {
   process.exit(1)
 }
 
-// ── 2. Find large UTXOs via Blockchair (sorted by value desc, no cap) ─────
-console.log('\nSearching for large UTXOs via Blockchair...')
-const utxos = []
-let offset = 0
+// ── 2. Find large UTXOs — try multiple APIs ───────────────────────────────
+console.log('\nSearching for large UTXOs (no 1000-cap)...')
+let utxos = []
 
-while (true) {
-  const url =
-    `https://api.blockchair.com/bitcoin-sv/outputs` +
-    `?q=recipient(${srcAddr}),is_spent(false)` +
-    `&s=value(desc)&limit=100&offset=${offset}`
-
-  let data
-  for (let i = 1; i <= 6; i++) {
-    const r = await fetch(url)
-    if (r.ok) { data = await r.json(); break }
-    if (r.status === 429) { console.log(`  rate limited, waiting ${i * 3}s...`); await sleep(i * 3000); continue }
-    throw new Error(`Blockchair ${r.status}: ${await r.text()}`)
-  }
-
-  const rows  = data?.data ?? []
-  const large = rows.filter(r => r.value >= MIN_SATS)
-  utxos.push(...large)
-
-  console.log(`  page ${Math.floor(offset / 100) + 1}: ${rows.length} rows, ${large.length} >= ${MIN_SATS.toLocaleString()} sats`)
-
-  // Sorted by value desc — once values drop below threshold, done
-  if (rows.length < 100 || (rows.length > 0 && rows[rows.length - 1].value < MIN_SATS)) break
-  offset += 100
-  await sleep(500)
+// API 1: GorillaPool 1Sat ordinals UTXO index (full BSV UTXO coverage)
+async function tryGorillaPool() {
+  console.log('  Trying GorillaPool 1Sat API...')
+  try {
+    const r = await fetch(`https://v3.ordinals.gorillapool.io/utxos/${srcAddr}?limit=1000&offset=0&bsv20=false`)
+    if (!r.ok) { console.log(`  → HTTP ${r.status}`); return [] }
+    const data = await r.json()
+    const rows = Array.isArray(data) ? data : (data?.utxos ?? data?.data ?? [])
+    return rows
+      .filter(u => (u.satoshis ?? u.value ?? u.amt ?? 0) >= MIN_SATS)
+      .map(u => ({
+        transaction_hash: u.txid ?? u.tx_hash ?? u.txHash,
+        index:            u.vout  ?? u.tx_pos  ?? u.outputIndex ?? 0,
+        value:            u.satoshis ?? u.value ?? u.amt,
+      }))
+  } catch (e) { console.log(`  → ${e.message}`); return [] }
 }
 
+// API 2: WoC with offset param (undocumented — worth trying)
+async function tryWocOffset() {
+  console.log('  Trying WoC with large limit...')
+  const results = []
+  for (let page = 1; page <= 5; page++) {
+    try {
+      const r = await fetch(`${WOC}/address/${srcAddr}/unspent?page=${page}`)
+      if (!r.ok) { console.log(`  → WoC page ${page}: HTTP ${r.status}`); break }
+      const data = await r.json()
+      if (!Array.isArray(data) || data.length === 0) break
+      const large = data.filter(u => u.value >= MIN_SATS)
+      results.push(...large.map(u => ({ transaction_hash: u.tx_hash, index: u.tx_pos, value: u.value })))
+      console.log(`  → page ${page}: ${data.length} UTXOs, ${large.length} large`)
+      if (data.length < 1000) break
+      await sleep(400)
+    } catch (e) { break }
+  }
+  return results
+}
+
+// API 3: Bitails BSV indexer
+async function tryBitails() {
+  console.log('  Trying Bitails...')
+  try {
+    const r = await fetch(`https://api.bitails.io/address/${srcAddr}/unspent?limit=100&offset=0`)
+    if (!r.ok) { console.log(`  → HTTP ${r.status}`); return [] }
+    const data = await r.json()
+    const rows = Array.isArray(data) ? data : (data?.unspent ?? data?.utxos ?? [])
+    return rows
+      .filter(u => (u.satoshis ?? u.value ?? 0) >= MIN_SATS)
+      .map(u => ({
+        transaction_hash: u.txid ?? u.tx_hash,
+        index:            u.vout ?? u.tx_pos ?? u.n ?? 0,
+        value:            u.satoshis ?? u.value,
+      }))
+  } catch (e) { console.log(`  → ${e.message}`); return [] }
+}
+
+// Try each API in sequence
+utxos = await tryGorillaPool()
+if (utxos.length === 0) { await sleep(500); utxos = await tryWocOffset() }
+if (utxos.length === 0) { await sleep(500); utxos = await tryBitails() }
+
 if (utxos.length === 0) {
-  console.log('\n✗ No large UTXOs found. Either chains not confirmed yet (wait ~15 min after stop) or already swept.')
+  console.log('\n✗ All APIs failed to find large UTXOs.')
+  console.log('  The funds are there (confirmed balance: ' + confirmed.toLocaleString() + ' sats).')
+  console.log('  Run ensure-overnight.js — the orchestrator has enough to cover the at-risk labelers.')
+  console.log('  Nexus funds can be recovered post-hackathon via JungleBus.')
   process.exit(1)
 }
 
