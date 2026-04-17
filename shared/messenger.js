@@ -14,32 +14,39 @@ import { PrivateKey } from '@bsv/sdk'
 export class LocalMessenger {
   constructor(agentKeyHex) {
     const priv = PrivateKey.fromHex(agentKeyHex)
-    this.agentKey      = priv.toPublicKey().toString()
-    this._handlers     = {}     // box → handler fn
-    this._ws           = null
-    this._ready        = false
-    this._queue        = []     // messages queued before connect
-    this._relayUrl     = 'ws://localhost:4000'
-    this._reconnecting = false  // guard against duplicate concurrent reconnects
+    this.agentKey       = priv.toPublicKey().toString()
+    this._handlers      = {}     // box → handler fn
+    this._ws            = null
+    this._ready         = false
+    this._queue         = []     // messages queued before connect
+    this._relayUrl      = 'ws://localhost:4000'
+    this._reconnecting  = false  // guard against duplicate concurrent reconnects
+    this._reconnAttempt = 0      // exponential backoff counter
+    this._generation    = 0      // incremented on each init() — stale WS events ignored
   }
 
   async init(relayUrl = 'ws://localhost:4000') {
     this._relayUrl = relayUrl
+    const gen = ++this._generation
+
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(relayUrl)
       this._ws = ws
+      let settled = false
 
       ws.on('open', () => {
-        // Register as an agent (routing identity)
+        if (gen !== this._generation) { ws.close(); return }
         ws.send(JSON.stringify({ role: 'agent', agentKey: this.agentKey }))
-        this._ready = true
-        // Flush any messages queued before connect
+        this._ready         = true
+        this._reconnecting  = false
+        this._reconnAttempt = 0
         for (const m of this._queue) ws.send(m)
         this._queue = []
-        resolve()
+        if (!settled) { settled = true; resolve() }
       })
 
       ws.on('message', (raw) => {
+        if (gen !== this._generation) return
         try {
           const msg = JSON.parse(raw)
           if (msg.type !== 'agent_msg') return
@@ -50,23 +57,35 @@ export class LocalMessenger {
       })
 
       ws.on('error', (err) => {
-        if (!this._ready) reject(err)
-        // 'close' will fire after 'error' — reconnect logic lives there
+        if (!settled) { settled = true; reject(err) }
+        // 'close' fires after 'error' — reconnect logic lives there
       })
 
       ws.on('close', () => {
+        if (gen !== this._generation) return  // stale WebSocket — ignore
         this._ready = false
-        // Guard: if a reconnect is already in flight (error fired before close),
-        // don't start a second concurrent init() — that creates two WebSockets
-        // racing to set this._ws and this._ready, corrupting message routing.
-        if (this._reconnecting) return
-        this._reconnecting = true
-        setTimeout(() => {
-          this._reconnecting = false
-          this.init(this._relayUrl).catch(() => {})
-        }, 1000)
+        this._scheduleReconnect()
       })
     })
+  }
+
+  // Exponential backoff reconnect: 1s, 2s, 4s, 8s, 16s, 30s cap.
+  // Retries indefinitely until the relay comes back.
+  _scheduleReconnect() {
+    if (this._reconnecting) return
+    this._reconnecting = true
+    this._reconnAttempt++
+    const delay = Math.min(1000 * Math.pow(2, this._reconnAttempt - 1), 30_000)
+    setTimeout(async () => {
+      try {
+        await this.init(this._relayUrl)
+        // success: open handler clears _reconnecting + _reconnAttempt
+      } catch {
+        // relay still down — allow _scheduleReconnect to fire again
+        this._reconnecting = false
+        this._scheduleReconnect()
+      }
+    }, delay)
   }
 
   send(recipientKey, box, body) {

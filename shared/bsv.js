@@ -50,12 +50,78 @@ export class BsvWallet {
     this._myScript = new P2PKH().lock(this.address)
     const myScriptHex = this._myScript.toHex()
 
-    this._utxos = raw.map(u => ({
-      txid:     u.tx_hash,
-      vout:     u.tx_pos,
-      satoshis: u.value,
-      script:   myScriptHex,
-    }))
+    // On forced refresh (chain recovery), filter out UTXOs we've already locally spent.
+    // WoC /unspent only shows confirmed outputs — unconfirmed spending txs aren't
+    // reflected. Without this filter, deep unconfirmed chains cause every subsequent
+    // send() to fail with txn-mempool-conflict since WoC returns the original confirmed
+    // input that our mempool chain already consumed.
+    const spentByUs = force ? this._recentlySpentOutpoints() : new Set()
+
+    this._utxos = raw
+      .filter(u => !spentByUs.has(u.tx_hash + ':' + u.tx_pos))
+      .map(u => ({
+        txid:     u.tx_hash,
+        vout:     u.tx_pos,
+        satoshis: u.value,
+        script:   myScriptHex,
+      }))
+  }
+
+  // Parse input outpoints from all transactions in _recentTxHex.
+  // Returns a Set of "txid:vout" strings for UTXOs we've already spent locally.
+  _recentlySpentOutpoints() {
+    const spent = new Set()
+    for (const hex of this._recentTxHex.values()) {
+      try {
+        const buf = Buffer.from(hex, 'hex')
+        let off = 4  // skip version (4 bytes)
+        const nIn = buf[off++]
+        if (nIn > 0xfc) continue  // skip multibyte varint (rare, not our txs)
+        for (let i = 0; i < nIn; i++) {
+          const txid = Buffer.from(buf.slice(off, off + 32)).reverse().toString('hex')
+          const vout = buf.readUInt32LE(off + 32)
+          spent.add(`${txid}:${vout}`)
+          off += 36
+          const scriptLen = buf[off++]
+          if (scriptLen > 0xfc) break  // skip multibyte varint
+          off += scriptLen + 4  // script bytes + sequence (4 bytes)
+        }
+      } catch { /* skip malformed */ }
+    }
+    return spent
+  }
+
+  // Merge large confirmed UTXOs from GorillaPool into the local pool.
+  // GorillaPool has no 1000-UTXO cap, so this recovers wallets with the dust
+  // UTXO problem where WoC's /unspent hides the real funded output behind 1000 dust entries.
+  async _mergeGorillaPoolUtxos() {
+    try {
+      const r = await fetch(
+        `https://v3.ordinals.gorillapool.io/utxos/${this.address}?bsv20=false`
+      )
+      if (!r.ok) return
+      const data = await r.json()
+      const rows = Array.isArray(data) ? data : (data?.utxos ?? data?.data ?? [])
+      const myScript = this._myScript ?? new P2PKH().lock(this.address)
+      const spentByUs = this._recentlySpentOutpoints()
+      const existingKeys = new Set(this._utxos.map(u => u.txid + ':' + u.vout))
+      const added = rows
+        .filter(u => {
+          const sats = u.satoshis ?? u.value ?? 0
+          const key  = `${u.txid ?? u.tx_hash}:${u.vout ?? u.tx_pos ?? 0}`
+          return sats >= 100_000 && !existingKeys.has(key) && !spentByUs.has(key)
+        })
+        .map(u => ({
+          txid:     u.txid ?? u.tx_hash,
+          vout:     u.vout ?? u.tx_pos ?? 0,
+          satoshis: u.satoshis ?? u.value,
+          script:   myScript.toHex(),
+        }))
+      if (added.length > 0) {
+        this._utxos.push(...added)
+        console.error(`[wallet] GorillaPool recovery: +${added.length} UTXOs added`)
+      }
+    } catch { /* best-effort */ }
   }
 
   // No-op — kept for compatibility. WoC source tx pre-fetching is no longer needed
@@ -192,13 +258,17 @@ export class BsvWallet {
 
       // Fire-and-forget broadcast. Don't await — return txid immediately so the
       // caller's queue can process the next payment without waiting for the network.
-      // On failure: log the error and schedule a UTXO pool reset from WhatsOnChain.
-      // The reset wipes phantom change UTXOs from the broken chain so subsequent
-      // sends use real confirmed UTXOs again. Debounced to avoid hammering WoC.
-      this._broadcast(tx).catch(err => {
-        // Use process.stderr.write to ensure visibility even when stdout is redirected
+      // On failure: retry broadcast 2× then reset UTXO pool from WoC.
+      // Retries handle transient ARC/network blips without breaking the chain.
+      // Pool reset uses _recentlySpentOutpoints() to avoid reloading already-spent UTXOs.
+      this._broadcast(tx).catch(async err => {
         process.stderr.write(`\n[BROADCAST FAIL] txid=${txid.slice(0, 16)} err=${err.message}\n`)
         console.error(`[wallet] broadcast failed ${txid.slice(0, 12)}: ${err.message}`)
+        // Retry twice before declaring chain broken
+        for (let i = 1; i <= 2; i++) {
+          await sleep(i * 2000)
+          try { await this._broadcast(tx); return } catch { /* continue */ }
+        }
         if (!this._chainBroken) {
           this._chainBroken = true
           setTimeout(async () => {
@@ -210,7 +280,7 @@ export class BsvWallet {
             } finally {
               this._chainBroken = false
             }
-          }, 2000)  // 2s debounce — collect all failures before hitting WoC once
+          }, 2000)
         }
       })
 
@@ -218,12 +288,13 @@ export class BsvWallet {
 
     } catch (err) {
       this._unlock(selected)
-      // If we ran out of funds, force a WoC refresh — a topup may have arrived
-      // that the local pool doesn't know about yet. This auto-recovers without restart.
+      // If we ran out of funds, try GorillaPool first (no UTXO cap — finds topup UTXOs
+      // hidden behind 1000 dust entries in WoC), then fall back to WoC /unspent.
       if (err.message.startsWith('Insufficient funds') && !this._chainBroken) {
         this._chainBroken = true
         setTimeout(async () => {
           try {
+            await this._mergeGorillaPoolUtxos()
             await this.refreshUtxos(true)
             console.error(`[wallet] UTXO pool refreshed after insufficient funds — ${this._utxos.length} UTXOs restored`)
           } catch (e) {
@@ -231,7 +302,7 @@ export class BsvWallet {
           } finally {
             this._chainBroken = false
           }
-        }, 5000)  // 5s debounce — don't hammer WoC on every retry
+        }, 5000)
       }
       throw err
     }
