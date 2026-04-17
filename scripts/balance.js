@@ -77,12 +77,13 @@ async function main() {
   console.log('─'.repeat(55))
   console.log(`  ${'TOTAL'.padEnd(12)}  ${String(totalSats).padStart(8)} sats  (${(totalSats / 1e8).toFixed(6)} BSV)\n`)
 
-  // 1.5M tx = 125,000 task cycles
-  // Each cycle: 10 bid txs (135 sat fee each) + 1 inscription (135) + 1 payment (135)
-  // = 12 txs × 135 sats fee = 1,620 sats in fees per cycle
-  // Plus 10 sats in bid deposits + 10 sats reward = 20 sats economic value
-  // Total per cycle: 1,640 sats
-  const needed24h = 125_000 * 1_640
+  // 1.5M tx = 138,240 task cycles (1.6/sec × 86,400s)
+  // Each cycle:
+  //   10 bid txs:    ~44 sats fee each (zero-output: OP_RETURN + change only)
+  //   1 inscription: ~44 sats fee
+  //   1 payment tx:  ~52 sats fee + 10 sats reward = 62 sats
+  // Total per cycle: 10×44 + 44 + 62 = 546 sats
+  const needed24h = 138_240 * 546
   console.log(`  Estimated sats needed for 1.5M tx (125k cycles × 1,640 sats): ${needed24h.toLocaleString()} sats`)
   console.log(`  Current total: ${totalSats.toLocaleString()} sats`)
   if (totalSats < needed24h) {
