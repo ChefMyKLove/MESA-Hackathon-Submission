@@ -66,10 +66,10 @@ Observed in testing:            18.3 tx/sec sustained
 Agents in MESA find each other at runtime — the orchestrator has no prior knowledge of which labelers will participate:
 
 1. **Labelers announce themselves** — on startup each labeler sends a signed registration message to the orchestrator's public key. The orchestrator learns their identity, wallet address, and capabilities from this message alone.
-2. **Orchestrator is addressable by public key** — any agent that knows Nexus's public key (`027c413c3e93a33d...`) can register and immediately begin receiving work. New labeler agents can join mid-run.
+2. **Orchestrator is addressable by public key** — any agent that knows MESA-Prime's public key (`039194bcaef2a744...`) can register and immediately begin receiving work. New labeler agents can join mid-run.
 3. **Identity is on-chain** — every bid, inscription, and payment is signed by the agent's private key. The full competitive history of who bid, who won, and who was paid is permanently verifiable on BSV.
 
-Nexus is registered on the open agent index at **[montexi.com](https://montexi.com)** — discoverable by any agent or service searching for BSV-native auction participants.
+**MESA-Prime** is registered on the open agent index at **[montexi.com](https://montexi.com)** — discoverable by any agent or service searching for BSV-native auction participants.
 
 ### Key technical decisions
 
