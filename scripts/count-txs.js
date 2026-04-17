@@ -1,15 +1,14 @@
 /**
  * scripts/count-txs.js
  *
- * Count every on-chain BSV transaction for ALL MESA wallets since April 14.
+ * Count unique on-chain BSV transactions for ALL MESA wallets since April 14.
  *
- * Strategy (fast — ~3 min total):
- *   1. Try BananaBlocks summary /api/v1/address/{addr} for tx_count directly
- *   2. If tx_count is 0/missing (known BB bug), binary-search for the last page,
- *      then derive total = last_page × page_size
- *   3. Cross-check recent WoC history to confirm blocks are in range
+ * Uses JungleBus (junglebus.gorillapool.io) which returns confirmed txs per
+ * address. Payment txs appear in BOTH the orchestrator AND the recipient
+ * labeler's history — we deduplicate by txid across all addresses.
  *
- * These wallets were created for this hackathon so ALL txs are since April 14.
+ * Also includes the OLD orchestrator (18xNrXZhS1jBVwPb9E3mUvLrLqnT29EGt9)
+ * which was the first orchestrator before the MESA-Prime upgrade.
  *
  * Run: node scripts/count-txs.js
  */
@@ -30,13 +29,17 @@ const ENV_FILES = [
   ['.env.labeler10',  'labeler-10'],
 ]
 
+// Old orchestrator — used before MESA-Prime, recovered via recover-nexus.js
+const OLD_ORCHESTRATOR = {
+  address: '18xNrXZhS1jBVwPb9E3mUvLrLqnT29EGt9',
+  label:   'OLD-orchestrator',
+}
+
+const JB_BASE  = 'https://junglebus.gorillapool.io/v1/address/get'
 const BB_BASE  = 'https://bananablocks.com/api/v1'
-const WOC_BASE = 'https://api.whatsonchain.com/v1/bsv/main'
+const SLEEP_MS = 600   // ~0.6s between requests
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
-
-// BananaBlocks rate limit: ~60 requests/burst. Sleep 1.2s between calls.
-const BB_SLEEP = 1200
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -55,156 +58,125 @@ function loadEnv(path) {
   } catch { return null }
 }
 
-// Fetch with retry on 429 (exponential backoff)
-async function bbFetch(url, attempt = 0) {
+async function jbFetch(addr) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const resp = await fetch(`${JB_BASE}/${addr}`, { signal: AbortSignal.timeout(30_000) })
+      if (resp.status === 429) {
+        const wait = 3000 * Math.pow(2, attempt)
+        process.stdout.write(`  [429 — waiting ${wait/1000}s]\n`)
+        await sleep(wait)
+        continue
+      }
+      if (!resp.ok) return null
+      const data = await resp.json()
+      return Array.isArray(data) ? data : null
+    } catch { return null }
+  }
+  return null
+}
+
+async function bbBlockTxCount(height) {
   try {
-    const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) })
-    if (resp.status === 429) {
-      const delay = Math.min(2000 * Math.pow(2, attempt), 30_000)
-      process.stdout.write(`  [429 rate limit — waiting ${(delay/1000).toFixed(0)}s]\n`)
-      await sleep(delay)
-      return bbFetch(url, attempt + 1)
-    }
+    const resp = await fetch(`${BB_BASE}/block/${height}`, { signal: AbortSignal.timeout(15_000) })
     if (!resp.ok) return null
-    return resp.json()
-  } catch {
-    return null
-  }
-}
-
-// Get page of txs — returns array or null
-async function bbPage(addr, page) {
-  const data = await bbFetch(`${BB_BASE}/address/${addr}/txs?page=${page}`)
-  if (!data) return null
-  if (Array.isArray(data)) return data
-  // Unwrap common envelope shapes
-  return data.txs || data.transactions || data.data || data.results || null
-}
-
-// Binary search: find the last page with any content.
-// BB pages are oldest-first; once a page returns [] or 404, we've gone past the end.
-async function findLastPage(addr) {
-  let lo = 1, hi = 50_000
-
-  // Quick sanity check — does page 1 exist?
-  await sleep(BB_SLEEP)
-  const p1 = await bbPage(addr, 1)
-  if (!p1 || p1.length === 0) return { lastPage: 0, pageSize: 0 }
-
-  const pageSize = p1.length
-
-  // Double hi until we find an empty page
-  let probe = 100
-  while (probe < hi) {
-    await sleep(BB_SLEEP)
-    const pg = await bbPage(addr, probe)
-    if (!pg || pg.length === 0) { hi = probe; break }
-    lo = probe
-    probe = Math.min(probe * 2, hi)
-  }
-
-  // Binary search between lo and hi
-  while (lo + 1 < hi) {
-    const mid = Math.floor((lo + hi) / 2)
-    await sleep(BB_SLEEP)
-    const pg = await bbPage(addr, mid)
-    if (pg && pg.length > 0) lo = mid
-    else hi = mid
-  }
-
-  // lo is now the last page with content
-  // Count txs on the last page to get the partial page size
-  await sleep(BB_SLEEP)
-  const lastPg = await bbPage(addr, lo)
-  const lastPageSize = lastPg ? lastPg.length : pageSize
-
-  return { lastPage: lo, pageSize, lastPageSize }
-}
-
-// Get total tx count = (lastPage - 1) × pageSize + lastPageSize
-async function countAddressTxs(addr, label) {
-  // ① Try BananaBlocks summary endpoint — tx_count is often present
-  await sleep(BB_SLEEP)
-  const summary = await bbFetch(`${BB_BASE}/address/${addr}`)
-  if (summary && summary.tx_count && summary.tx_count > 0) {
-    console.log(`  ✓ ${label}: ${summary.tx_count.toLocaleString()} txs (from BB summary)`)
-    return { count: summary.tx_count, method: 'summary' }
-  }
-
-  // ② summary.tx_count is 0 or missing — binary search for last page
-  console.log(`  [${label}] tx_count not in summary — searching via binary search...`)
-  const { lastPage, pageSize, lastPageSize } = await findLastPage(addr)
-
-  if (lastPage === 0) {
-    console.log(`  ✓ ${label}: 0 txs (no pages found)`)
-    return { count: 0, method: 'binary' }
-  }
-
-  const count = (lastPage - 1) * pageSize + lastPageSize
-  console.log(`  ✓ ${label}: ~${count.toLocaleString()} txs (${lastPage} pages × ${pageSize} + ${lastPageSize} partial)`)
-  return { count, method: 'binary' }
+    const d = await resp.json()
+    return d.tx_count || null
+  } catch { return null }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log('═'.repeat(62))
-  console.log('  MESA On-Chain Transaction Count — All Time (Since Apr 14)')
-  console.log('═'.repeat(62))
-  console.log('\n  These wallets were created for this hackathon — all txs are')
-  console.log('  from April 14–17. No date filtering required.\n')
+  console.log('═'.repeat(68))
+  console.log('  MESA On-Chain Transaction Count (JungleBus — confirmed only)')
+  console.log('═'.repeat(68))
+  console.log('\n  JungleBus returns confirmed txs per address.')
+  console.log('  Payment txs appear in BOTH payer and payee history — deduped by txid.\n')
 
-  let grandTotal = 0
-  const results  = []
+  const allTxids  = new Set()
+  const perWallet = []
+
+  // Build wallet list: old orchestrator + current wallets
+  const wallets = [OLD_ORCHESTRATOR]
 
   for (const [file, label] of ENV_FILES) {
     const env = loadEnv(file)
-    if (!env?.AGENT_KEY) {
-      console.log(`  ${label.padEnd(12)} — env file missing or no AGENT_KEY`)
-      continue
-    }
-
-    let address
+    if (!env?.AGENT_KEY) { wallets.push({ address: null, label }); continue }
     try {
       const priv = PrivateKey.fromHex(env.AGENT_KEY)
-      address = priv.toAddress().toString()
-    } catch {
-      console.log(`  ${label.padEnd(12)} — could not derive address`)
-      continue
+      wallets.push({ address: priv.toAddress().toString(), label })
+    } catch { wallets.push({ address: null, label }) }
+  }
+
+  for (const { address, label } of wallets) {
+    if (!address) { console.log(`  ${label.padEnd(16)} — missing`); continue }
+
+    process.stdout.write(`▶ ${label.padEnd(16)} ${address}  `)
+    await sleep(SLEEP_MS)
+    const txs = await jbFetch(address)
+
+    if (!txs) { console.log('(fetch failed)'); continue }
+
+    const before = allTxids.size
+    for (const tx of txs) {
+      const id = tx.transaction_id || tx.txid || tx.tx_hash
+      if (id) allTxids.add(id)
     }
+    const unique = allTxids.size - before
+    const dupes  = txs.length - unique
 
-    console.log(`\n▶ ${label}  ${address}`)
-    const { count, method } = await countAddressTxs(address, label)
-    grandTotal += count
-    results.push({ label, address, count, method })
+    perWallet.push({ label, address, raw: txs.length, unique, dupes })
+    console.log(`${txs.length.toLocaleString().padStart(7)} raw, ${unique.toLocaleString().padStart(7)} new, ${dupes.toLocaleString().padStart(6)} dupes`)
   }
 
-  // ── Summary ────────────────────────────────────────────────────────────────
-  console.log('\n' + '═'.repeat(62))
-  console.log('  FINAL SUMMARY\n')
+  // ── Block coverage summary ─────────────────────────────────────────────────
+  console.log('\n  Gathering block coverage...\n')
 
-  for (const { label, count, method } of results) {
-    const m = method === 'binary' ? '~' : ' '
-    console.log(`  ${label.padEnd(14)}  ${m}${count.toLocaleString().padStart(9)} txs`)
+  // Collect block heights from all txids
+  // (We'd need to re-fetch, but we can estimate from JungleBus data we already have)
+  // Instead, show total unique txid count across all wallets
+
+  console.log('═'.repeat(68))
+  console.log('  PER-WALLET BREAKDOWN\n')
+  for (const { label, raw, unique, dupes } of perWallet) {
+    console.log(`  ${label.padEnd(16)} ${raw.toLocaleString().padStart(7)} raw  ${unique.toLocaleString().padStart(7)} net-new  ${dupes.toLocaleString().padStart(6)} dupes`)
   }
 
-  console.log('─'.repeat(62))
-  const prefix = results.some(r => r.method === 'binary') ? '~' : ' '
-  console.log(`  ${'TOTAL'.padEnd(14)}  ${prefix}${grandTotal.toLocaleString().padStart(9)} txs since April 14`)
+  const grandTotal = allTxids.size
+  const TARGET     = 1_500_000
+  const pct        = ((grandTotal / TARGET) * 100).toFixed(2)
 
-  const TARGET = 1_500_000
-  const pct    = ((grandTotal / TARGET) * 100).toFixed(1)
-  console.log(`  ${'TARGET'.padEnd(14)}   ${TARGET.toLocaleString().padStart(9)} txs`)
-  console.log(`  ${'PROGRESS'.padEnd(14)}   ${pct}% of 1.5M target`)
+  console.log('\n' + '─'.repeat(68))
+  console.log(`  ${'UNIQUE TXIDS (confirmed)'.padEnd(16)} ${grandTotal.toLocaleString().padStart(7)}`)
+  console.log()
+  console.log(`  Target:   1,500,000`)
+  console.log(`  Achieved: ${grandTotal.toLocaleString()}  (${pct}% of target)`)
+  console.log()
 
+  // ── Context note ───────────────────────────────────────────────────────────
+  console.log('  NOTE: JungleBus may cap results per address (~10k-12k seen).')
+  console.log('  Check BananaBlocks block stats for the full picture:')
+
+  // Fetch block tx counts for key blocks we know about
+  const keyBlocks = [944277, 944285, 944370, 944403]
+  for (const h of keyBlocks) {
+    await sleep(800)
+    const count = await bbBlockTxCount(h)
+    if (count) {
+      console.log(`    Block ${h}: ${count.toLocaleString()} total BSV txs in block`)
+    }
+  }
+
+  console.log()
   if (grandTotal >= TARGET) {
-    console.log('\n  🟢 TARGET ACHIEVED — 1.5M+ confirmed on-chain transactions!')
+    console.log('  🟢 TARGET ACHIEVED — 1.5M+ confirmed on-chain transactions!')
   } else {
     const needed = TARGET - grandTotal
-    console.log(`\n  🟡 ${needed.toLocaleString()} more txs needed`)
+    console.log(`  🟡 ${needed.toLocaleString()} more needed to reach 1.5M target`)
+    console.log('  (JungleBus may be capped — actual count could be higher)')
   }
-
-  console.log('═'.repeat(62) + '\n')
+  console.log('═'.repeat(68) + '\n')
 }
 
 main().catch(err => {
