@@ -119,22 +119,14 @@ agent.listen(BOXES.JOB_POSTINGS, async ({ sender, body }) => {
   bidsSubmitted++
   relay.bidReceived(taskId, taskId, agent.identityKey, `labeler-${INSTANCE_ID}`, SATS.BID_DEPOSIT)
 
-  // ② Enqueue on-chain bid tx — goes through single wallet queue so all sends chain.
-  // After the first tx lands, every subsequent one uses a cached change UTXO → zero WoC calls.
+  // ② Enqueue on-chain bid tx — zero-output: OP_RETURN + fee only.
+  // No payment output = no dust UTXO accumulation. Fee proves economic intent.
+  // Single wallet queue chains UTXOs so every subsequent tx uses change from the last.
   ;(async () => {
     try {
-      const orchAddr = await getOrchestratorAddress()
-      if (orchAddr) {
-        // Zero-output bid: OP_RETURN + fee only. No payment output = no dust UTXO
-        // created. The tx fee itself proves economic intent. The OP_RETURN embeds
-        // all bid data on-chain. orchAddr still verified for protocol compliance.
-        const bidTxid = await walletSend(
-          [],
-          opReturnBid(taskId, agent.identityKey)
-        )
-        txOnChain++
-        if (txOnChain <= 3) agent.log(`⛓ BID TX #${txOnChain}: https://whatsonchain.com/tx/${bidTxid}`)
-      }
+      const bidTxid = await walletSend([], opReturnBid(taskId, agent.identityKey))
+      txOnChain++
+      if (txOnChain <= 3) agent.log(`⛓ BID TX #${txOnChain}: https://whatsonchain.com/tx/${bidTxid}`)
     } catch (err) {
       agent.log(`⚠ Bid tx failed for ${taskId}: ${err.message}`)
     }
