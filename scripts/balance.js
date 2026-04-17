@@ -48,13 +48,26 @@ async function main() {
 
     const wallet = new BsvWallet(env.AGENT_KEY)
     try {
-      await wallet.refreshUtxos(true)
-      const bal   = wallet.balance()
-      const utxos = wallet._utxos.length
-      totalSats  += bal
+      // Use WoC /balance endpoint — returns true confirmed total regardless of UTXO count.
+      // The /unspent endpoint caps at 1000 results (oldest-first), so addresses with many
+      // dust UTXOs (e.g. orchestrator after labeler bid accumulation) report wrong balances.
+      const balResp = await fetch(`https://api.whatsonchain.com/v1/bsv/main/address/${wallet.address_str}/balance`)
+      let bal = 0
+      let utxoNote = ''
+      if (balResp.ok) {
+        const { confirmed, unconfirmed } = await balResp.json()
+        bal = confirmed + (unconfirmed || 0)
+        utxoNote = unconfirmed ? ` (+${unconfirmed} unconf)` : ''
+      } else {
+        // Fallback to local UTXO pool
+        await wallet.refreshUtxos(true)
+        bal = wallet.balance()
+        utxoNote = ` (${wallet._utxos.length} UTXOs)`
+      }
+      totalSats += bal
       const flag  = bal < 1_000_000 ? ' ⚠ LOW' : bal < 5_000_000 ? ' ⚡ OK' : ' ✓'
       console.log(
-        `  ${label.padEnd(12)}  ${String(bal).padStart(8)} sats  (${utxos} UTXOs)${flag}`)
+        `  ${label.padEnd(12)}  ${String(bal).padStart(12)} sats${utxoNote}${flag}`)
       console.log(`  ${''.padEnd(12)}  ${wallet.address_str}`)
     } catch (err) {
       console.log(`  ${label.padEnd(12)}  ⚠ fetch failed: ${err.message}`)
