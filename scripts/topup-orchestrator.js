@@ -11,7 +11,7 @@ const ARC = 'https://arc.gorillapool.io/v1/tx'
 const FEE_RATE = 200  // sat/KB
 
 const ORCH_ADDR = '1CXWMmLfqF68jHtLiUGcm4hYW5Me75CUaX'  // new orchestrator
-const AMOUNT   = 10_000_000  // 0.1 BSV
+const AMOUNT   = 0  // 0 = send all visible UTXOs (auto-detect)
 
 const KEY = process.env.AGENT_KEY
 if (!KEY) { console.error('Usage: node --env-file=.env.labeler7 scripts/topup-orchestrator.js'); process.exit(1) }
@@ -43,19 +43,31 @@ const usable = all.sort((a, b) => b.value - a.value)
 const totalAvailable = usable.reduce((s, u) => s + u.value, 0)
 console.log(`   ${usable.length} UTXOs, total ${totalAvailable.toLocaleString()} sats`)
 
-if (totalAvailable < AMOUNT + 1000) {
-  console.error(`   ✗ Insufficient funds: ${totalAvailable} sats available, need ${AMOUNT + 1000}`)
+if (totalAvailable < 2000) {
+  console.error(`   ✗ Nothing to send`); process.exit(1)
+}
+
+// AMOUNT=0 means sweep everything visible to orchestrator (no change output)
+const sendAll = AMOUNT === 0
+const sendAmount = sendAll ? totalAvailable : AMOUNT
+
+if (!sendAll && totalAvailable < sendAmount + 1000) {
+  console.error(`   ✗ Insufficient funds: ${totalAvailable} sats available, need ${sendAmount + 1000}`)
   process.exit(1)
 }
 
-// Select UTXOs
+console.log(`   Mode: ${sendAll ? 'SWEEP ALL' : 'fixed amount'}`)
+
+// Select UTXOs — all of them if sweeping, otherwise just enough
 const myScript = new P2PKH().lock(address)
-const selected = []
-let total = 0
-for (const u of usable) {
-  selected.push(u)
-  total += u.value
-  if (total >= AMOUNT + 10_000) break
+const selected = sendAll ? usable : []
+let total = sendAll ? totalAvailable : 0
+if (!sendAll) {
+  for (const u of usable) {
+    selected.push(u)
+    total += u.value
+    if (total >= sendAmount + 10_000) break
+  }
 }
 console.log(`   Selected ${selected.length} UTXOs (${total.toLocaleString()} sats)`)
 
@@ -75,18 +87,25 @@ for (const u of selected) {
   })
 }
 
-// Payment output to orchestrator
-tx.addOutput({ lockingScript: new P2PKH().lock(ORCH_ADDR), satoshis: AMOUNT })
-// Change back to self
-tx.addOutput({ lockingScript: new P2PKH().lock(address), change: true })
+if (sendAll) {
+  // Sweep: single output to orchestrator, fee deducted automatically via change:true trick
+  // Use change:true on the orchestrator output so SDK calculates fee correctly
+  tx.addOutput({ lockingScript: new P2PKH().lock(ORCH_ADDR), change: true })
+} else {
+  // Fixed amount: payment to orchestrator + change back to self
+  tx.addOutput({ lockingScript: new P2PKH().lock(ORCH_ADDR), satoshis: sendAmount })
+  tx.addOutput({ lockingScript: new P2PKH().lock(address), change: true })
+}
 
 await tx.fee(new SatoshisPerKilobyte(FEE_RATE))
 await tx.sign()
 
-const hex    = tx.toHex()
-const txid   = tx.id('hex')
+const hex     = tx.toHex()
+const txid    = tx.id('hex')
 const outSats = tx.outputs[0]?.satoshis ?? 0
-const fee    = total - outSats - (tx.outputs[1]?.satoshis ?? 0)
+const fee     = sendAll
+  ? total - outSats
+  : total - outSats - (tx.outputs[1]?.satoshis ?? 0)
 
 console.log(`   txid: ${txid}`)
 console.log(`   fee:  ${fee} sats`)
