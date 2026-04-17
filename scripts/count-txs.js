@@ -179,26 +179,6 @@ async function main() {
     results.push({ label, address, count, method })
   }
 
-  // ── Cross-check with WoC history (recent txids) ────────────────────────────
-  console.log('\n' + '─'.repeat(62))
-  console.log('  WoC recent-tx cross-check (100 most recent per wallet):\n')
-
-  let wocRecentTotal = 0
-  for (const { label, address } of results) {
-    try {
-      await sleep(300)
-      const resp = await fetch(`${WOC_BASE}/address/${address}/history`,
-        { signal: AbortSignal.timeout(8000) })
-      if (resp.ok) {
-        const txs = await resp.json()
-        wocRecentTotal += txs.length
-        const minH = txs.reduce((m, t) => t.height > 0 && t.height < m ? t.height : m, Infinity)
-        const maxH = txs.reduce((m, t) => t.height > m ? t.height : m, 0)
-        console.log(`  ${label.padEnd(12)}  ${txs.length} recent txs  blocks ${minH === Infinity ? 'unconf' : minH}–${maxH}`)
-      }
-    } catch { /* skip */ }
-  }
-
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log('\n' + '═'.repeat(62))
   console.log('  FINAL SUMMARY\n')
