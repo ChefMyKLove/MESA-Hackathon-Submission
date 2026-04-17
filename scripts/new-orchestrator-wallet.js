@@ -15,7 +15,7 @@ import { readFileSync, writeFileSync, existsSync } from 'fs'
 const WOC = 'https://api.whatsonchain.com/v1/bsv/main'
 const ARC = 'https://arc.gorillapool.io/v1/tx'
 const FEE_RATE = 200
-const FUND_AMOUNT = 50_000_000  // 0.5 BSV to new orchestrator
+const FUND_AMOUNT = 15_000_000  // 0.15 BSV to new orchestrator (needs ~8M for 24h, 15M = safe headroom)
 
 const LABELER_ENV_FILES = [
   '.env.labeler8', '.env.labeler6', '.env.labeler7', '.env.labeler4',

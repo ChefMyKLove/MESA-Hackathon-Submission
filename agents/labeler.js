@@ -125,11 +125,11 @@ agent.listen(BOXES.JOB_POSTINGS, async ({ sender, body }) => {
     try {
       const orchAddr = await getOrchestratorAddress()
       if (orchAddr) {
-        // Send bid deposit to self (not orchestrator) to prevent dust UTXO
-        // accumulation on the orchestrator address. The bid is still proven
-        // on-chain via the OP_RETURN — orchAddr only used for verification.
+        // Zero-output bid: OP_RETURN + fee only. No payment output = no dust UTXO
+        // created. The tx fee itself proves economic intent. The OP_RETURN embeds
+        // all bid data on-chain. orchAddr still verified for protocol compliance.
         const bidTxid = await walletSend(
-          [{ address: wallet.address_str, satoshis: SATS.BID_DEPOSIT }],
+          [],
           opReturnBid(taskId, agent.identityKey)
         )
         txOnChain++
@@ -176,8 +176,9 @@ agent.listen(BOXES.AWARDS, async ({ sender, body }) => {
   ;(async () => {
     try {
       await sleep(1500)
+      // Zero-output inscription: OP_RETURN + fee only. No dust UTXO created.
       await walletSend(
-        [{ address: wallet.address_str, satoshis: SATS.BID_DEPOSIT }],
+        [],
         opReturnResult(taskId, agent.identityKey, label, confidence.toFixed(2))
       )
       txOnChain++
