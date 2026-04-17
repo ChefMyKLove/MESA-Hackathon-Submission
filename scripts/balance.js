@@ -39,6 +39,8 @@ async function main() {
 
   let totalSats = 0
 
+  const sleep = ms => new Promise(r => setTimeout(r, ms))
+
   for (const [file, label] of ENV_FILES) {
     const env = loadEnv(file)
     if (!env?.AGENT_KEY) {
@@ -72,6 +74,7 @@ async function main() {
     } catch (err) {
       console.log(`  ${label.padEnd(12)}  ⚠ fetch failed: ${err.message}`)
     }
+    await sleep(300)
   }
 
   console.log('─'.repeat(55))
