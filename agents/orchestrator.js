@@ -207,8 +207,8 @@ async function awardTask(tid) {
 
 // ── Main loop — post tasks at target rate ─────────────────────────────────────
 
-const TARGET_TASKS_PER_SEC = 1.6          // slightly over 1.58 for safety margin
-const INTERVAL_MS = 1000 / TARGET_TASKS_PER_SEC  // ~625ms between tasks
+const TARGET_TASKS_PER_SEC = 3.0
+const INTERVAL_MS = 1000 / TARGET_TASKS_PER_SEC  // ~333ms between tasks
 
 agent.log(`Waiting 15s for labeler agents to register...`)
 
@@ -222,11 +222,7 @@ async function loop() {
   if (!_running) return
   const t0 = Date.now()
 
-  try {
-    await postTask()
-  } catch (err) {
-    agent.log(`⚠ postTask error: ${err.message}`)
-  }
+  postTask().catch(err => agent.log(`⚠ postTask error: ${err.message}`))
 
   const elapsed = Date.now() - t0
   const delay   = Math.max(0, INTERVAL_MS - elapsed)

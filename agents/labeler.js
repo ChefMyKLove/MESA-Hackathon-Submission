@@ -167,7 +167,7 @@ agent.listen(BOXES.AWARDS, async ({ sender, body }) => {
   // chain from the bid's change output) is broadcast. Eliminates "Missing inputs" errors.
   ;(async () => {
     try {
-      await sleep(1500)
+      await sleep(400)
       // Zero-output inscription: OP_RETURN + fee only. No dust UTXO created.
       await walletSend(
         [],

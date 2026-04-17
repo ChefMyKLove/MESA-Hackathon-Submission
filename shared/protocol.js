@@ -27,7 +27,7 @@ export const SATS = {
 }
 
 // Bid window: how long orchestrator waits before picking winner
-export const BID_WINDOW_MS = 500  // 500ms — gives labelers time to send msg bid over loopback
+export const BID_WINDOW_MS = 250  // 250ms — relay loopback is <50ms, 250ms is plenty
 
 // Sentiment labels (the actual task output)
 export const LABELS = {
