@@ -249,6 +249,73 @@ Search for any MESA labeler wallet (e.g. `1EGTpLTXwUa174fdqfzHG9gKPmZW1dJt7C`) o
 
 ---
 
+## Agent wallet addresses
+
+| Agent | Name | Address |
+|-------|------|---------|
+| orchestrator | MESA-Prime | [1CXWMmLfqF68jHtLiUGcm4hYW5Me75CUaX](https://whatsonchain.com/address/1CXWMmLfqF68jHtLiUGcm4hYW5Me75CUaX) |
+| labeler-1 | Aria | [1EGTpLTXwUa174fdqfzHG9gKPmZW1dJt7C](https://whatsonchain.com/address/1EGTpLTXwUa174fdqfzHG9gKPmZW1dJt7C) |
+| labeler-2 | Bruno | *(see .env.labeler2)* |
+| labeler-3 | Cleo | *(see .env.labeler3)* |
+| labeler-4 | Dash | *(see .env.labeler4)* |
+| labeler-5 | Echo | *(see .env.labeler5)* |
+| labeler-6 | Flux | *(see .env.labeler6)* |
+| labeler-7 | Grit | *(see .env.labeler7)* |
+| labeler-8 | Halo | *(see .env.labeler8)* |
+| labeler-9 | Iris | *(see .env.labeler9)* |
+| labeler-10 | Jazz | *(see .env.labeler10)* |
+
+---
+
+## Troubleshooting: why MESA has two orchestrators
+
+MESA was originally deployed with a single orchestrator wallet (Nexus). Midway through the production run, Nexus stopped paying labelers and collapsed to ~0 tx/sec. The root cause was a cascade of three BSV-specific infrastructure issues:
+
+### The WoC 1000-UTXO pagination problem
+
+WhatsOnChain's `/address/{address}/unspent` endpoint returns at most **1000 UTXOs**, sorted oldest-first. During a long MESA run, labelers send 1-sat bid transactions to the orchestrator — 10 bids per task cycle × 1.6 cycles/sec = **16 dust UTXOs accumulating on the orchestrator every second**. After ~17 minutes, Nexus had 1,000+ dust UTXOs, and all further WoC `/unspent` calls returned only the oldest 1,000 dust entries.
+
+The orchestrator wallet's `refreshUtxos()` call — which ran on startup and on broadcast failures — would overwrite the local UTXO pool with this 1,000-UTXO dust set. Every real funded UTXO (the ones containing the topup funds we sent) was at position 1,001+ and permanently invisible.
+
+**Effect:** Nexus "saw" only ~1,000 sats at any time, even though 3.43 BSV of topup funds were sitting in UTXOs beyond the cap. Every `wallet.send()` call returned "Insufficient funds" and crashed.
+
+### Zero-output transactions: the fix
+
+The architectural fix was changing bid and inscription transactions from P2PKH-to-self outputs to **zero-output transactions** — just `OP_RETURN` data plus a fee, no change output. This eliminated dust accumulation entirely:
+
+- **Before:** each bid created a 1-sat output at the orchestrator → dust pile-up
+- **After:** each bid burns the fee only, no output at all → orchestrator accumulates zero UTXOs
+
+The `walletSend([], opReturn(...))` call pattern now used in `agents/labeler.js` sends to an empty outputs array. The BSV SDK handles fee calculation via UTXO chain — no confirmed inputs needed, no dust created.
+
+### MESA-Prime: the new orchestrator
+
+Rather than recovering Nexus (which would require a JungleBus-backed paginated UTXO scan to find funds buried past the 1000-UTXO cliff), we generated a fresh orchestrator wallet: **MESA-Prime** (`1CXWMmLfqF68jHtLiUGcm4hYW5Me75CUaX`).
+
+Starting fresh meant WoC always returns the funded UTXOs first — no history, no dust. All 10 labeler `.env` files were updated with the new `ORCHESTRATOR_KEY` (MESA-Prime's public key) so registrations route correctly. Railway environment variables were updated to match.
+
+### Labeler sats depletion
+
+Labelers also face a variant of this problem. Each labeler starts up and calls `refreshUtxos()` once — pulling its 1000 oldest UTXOs from WoC. If the labeler ran previously and accumulated dust, WoC returns 1000 dust UTXOs totalling perhaps 1,000 sats, while the real funded UTXO (22M+ sats) sits past position 1000.
+
+The labeler's local UTXO pool is seeded from this dust set. It immediately chains transactions off the dust (valid — UTXO chaining works correctly), but burns through 1000 × 1-sat = 1000 sats in under a minute, then hits empty.
+
+**Workaround:** Top up a depleted labeler with a small number of large UTXOs using:
+
+```bash
+# Send all sats from labeler-8 to labeler-9
+node scripts/topup-labeler.js 8 9
+
+# Send 5M sats from labeler-6 to labeler-4
+node scripts/topup-labeler.js 6 4 5000000
+```
+
+This creates a single large UTXO on the target labeler. On next restart, WoC returns that UTXO as the first result (most recent by default on fresh wallets with no dust history), and the labeler operates normally.
+
+**Long-term fix (post-hackathon):** Replace WoC `/unspent` with JungleBus paginated queries so `refreshUtxos()` returns all UTXOs regardless of count, and the 1000-UTXO cliff disappears entirely.
+
+---
+
 ## Hackathon submission checklist
 
 - [x] 1,500,000+ on-chain BSV transactions in the 72h window
