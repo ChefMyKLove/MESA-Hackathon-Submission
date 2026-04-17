@@ -52,8 +52,8 @@ export function emit(type, data) {
   if (_connected && _ws?.readyState === WebSocket.OPEN) {
     _ws.send(JSON.stringify(evt))
   } else {
-    // Cap queue at 100 events to avoid memory leak
-    if (_queue.length < 100) _queue.push(evt)
+    // Cap queue at 5000 events (~28 min of bids at 3 tasks/sec)
+    if (_queue.length < 5000) _queue.push(evt)
   }
 }
 

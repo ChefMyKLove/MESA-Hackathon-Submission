@@ -77,7 +77,6 @@ function reducer(state, action) {
     case 'job:posted':
       return {
         ...state,
-        totalTxs: state.totalTxs + 1,
         messages: [
           { _isJob: true, ...action.data, ts: action.ts },
           ...state.messages,
@@ -138,9 +137,13 @@ function reducer(state, action) {
         latencyMs:   pending.postedAt ? action.ts - pending.postedAt : null,
       }
 
+      // Only count on-chain inscription txs (from individual labelers, role='labeler-N').
+      // The orchestrator batch also fires result:delivered (role='labeler') — skip that duplicate.
+      const isInscription = action.data.role && action.data.role !== 'labeler'
+
       return {
         ...state,
-        totalTxs: state.totalTxs + 1,
+        totalTxs: isInscription ? state.totalTxs + 1 : state.totalTxs,
         agents: {
           ...state.agents,
           [action.data.agentKey]: {
@@ -233,13 +236,15 @@ export function useRelay() {
   const wsRef  = useRef(null)
   const txBuf  = useRef([])
 
-  // Update tx/sec every second from rolling 10s window
+  // Update tx/sec every second from rolling 30s window.
+  // 30s smooths out 200ms payment batches and relay-reconnect queue flushes
+  // without being so long that it hides real throughput changes.
   useEffect(() => {
     const id = setInterval(() => {
       const now    = Date.now()
-      const cutoff = now - 10_000
+      const cutoff = now - 30_000
       txBuf.current = txBuf.current.filter(t => t > cutoff)
-      setTxPerSec(+(txBuf.current.length / 10).toFixed(1))
+      setTxPerSec(+(txBuf.current.length / 30).toFixed(1))
     }, 1000)
     return () => clearInterval(id)
   }, [])
