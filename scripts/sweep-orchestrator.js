@@ -97,6 +97,7 @@ async function fetchGorillaPool() {
 
 async function fetchBitails() {
   const all = []
+  const seen = new Set()  // detect broken pagination that returns same page repeatedly
   let offset = 0
   const limit = 1000
 
@@ -110,13 +111,29 @@ async function fetchBitails() {
       const data  = await r.json()
       const rows  = Array.isArray(data) ? data : (data?.unspent ?? data?.utxos ?? data?.data ?? [])
       if (rows.length === 0) break
+
+      let newOnThisPage = 0
       for (const u of rows) {
         const txid = u.txid ?? u.tx_hash
         const vout = u.vout ?? u.tx_pos ?? u.n ?? 0
         const sats = u.satoshis ?? u.value ?? 0
-        if (txid && sats > 0) all.push({ txid, vout, satoshis: sats })
+        const key  = `${txid}:${vout}`
+        if (txid && sats > 0 && !seen.has(key)) {
+          seen.add(key)
+          all.push({ txid, vout, satoshis: sats })
+          newOnThisPage++
+        }
       }
+
       process.stdout.write(`\r   Bitails: ${all.length.toLocaleString()} UTXOs fetched...`)
+
+      // Broken pagination: API returned a full page but every entry was a duplicate.
+      // This is the same bug as BananaBlocks — stop rather than loop forever.
+      if (newOnThisPage === 0) {
+        console.log(`\n   Bitails pagination broken at offset ${offset} — stopping (got ${all.length} unique UTXOs)`)
+        break
+      }
+
       if (rows.length < limit) break
       offset += limit
       await sleep(400)
