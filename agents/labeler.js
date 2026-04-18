@@ -66,10 +66,10 @@ let tasksCompleted = 0
 let txOnChain      = 0
 let startTime      = Date.now()
 
-// Single wallet queue — one serial UTXO chain per labeler instance.
-// fire-and-forget makes each send() return in <10ms so throughput is fine at 1.6 tx/sec.
-// A single chain guarantees txs arrive at ARC in order — no "Missing inputs" chain breaks.
-const NUM_WALLET_QUEUES = 1
+// 4 parallel wallet queues — each queue is an independent UTXO chain.
+// send() now awaits broadcast (~300-500ms), so parallelism is essential for throughput.
+// 4 queues × ~2 tx/sec per queue = ~8 confirmed on-chain tx/sec per labeler instance.
+const NUM_WALLET_QUEUES = 4
 const _walletQueues = Array.from({ length: NUM_WALLET_QUEUES }, () => Promise.resolve())
 let _walletQueueIdx = 0
 
@@ -112,20 +112,19 @@ agent.listen(BOXES.JOB_POSTINGS, async ({ sender, body }) => {
   const taskId = body.id
   const text   = body.tx
 
-  // ① Send msg bid IMMEDIATELY — must land within BID_WINDOW_MS
-  //   On-chain tx happens async so WoC latency never blocks bidding
+  // ① Send relay bid message immediately so orchestrator knows we're competing.
+  //   bidTxid will be updated once the on-chain tx confirms (below).
   const bidMsg = mkBid({ taskId, agentKey: agent.identityKey, bidTxid: 'pending' })
   await agent.send(sender, BOXES.BIDS, bidMsg)
   bidsSubmitted++
-  relay.bidReceived(taskId, taskId, agent.identityKey, `labeler-${INSTANCE_ID}`, SATS.BID_DEPOSIT)
 
-  // ② Enqueue on-chain bid tx — zero-output: OP_RETURN + fee only.
-  // No payment output = no dust UTXO accumulation. Fee proves economic intent.
-  // Single wallet queue chains UTXOs so every subsequent tx uses change from the last.
+  // ② Enqueue on-chain bid tx — awaits confirmed broadcast before counting.
+  //   Relay event fires only after ARC confirms storage, so UI count = real on-chain count.
   ;(async () => {
     try {
       const bidTxid = await walletSend([], opReturnBid(taskId, agent.identityKey))
       txOnChain++
+      relay.bidReceived(taskId, taskId, agent.identityKey, `labeler-${INSTANCE_ID}`, SATS.BID_DEPOSIT)
       if (txOnChain <= 3) agent.log(`⛓ BID TX #${txOnChain}: https://whatsonchain.com/tx/${bidTxid}`)
     } catch (err) {
       agent.log(`⚠ Bid tx failed for ${taskId}: ${err.message}`)
@@ -147,33 +146,31 @@ agent.listen(BOXES.AWARDS, async ({ sender, body }) => {
   // rule-based if the model isn't ready. Runs locally, no API call.
   const { label, confidence } = await mlLabel(text)
 
-  // Send result to orchestrator IMMEDIATELY — don't wait for on-chain inscription.
-  // Decoupling result delivery from inscription is critical for throughput:
-  // inscription queues behind bid txs and can take minutes when backlogged.
+  // Send result to orchestrator immediately — payment must not wait for inscription.
+  // The inscription is on-chain proof but the orchestrator pays on result receipt.
   const resultMsg = mkResult({
     taskId,
     agentKey: agent.identityKey,
     label,
     confidence,
-    resultTxid: 'pending',  // inscription fires async below
+    resultTxid: 'pending',  // filled in async below
   })
 
   await agent.send(sender, BOXES.RESULTS, resultMsg)
   tasksCompleted++
-  relay.resultDelivered(taskId, taskId, agent.identityKey, `labeler-${INSTANCE_ID}`, `${label} (${Math.round(confidence * 100)}%)`)
 
-  // Inscribe result on-chain async — proves work on BSV, but never blocks payment.
-  // 1.5s delay ensures the bid tx lands in ARC before the inscription tx (which may
-  // chain from the bid's change output) is broadcast. Eliminates "Missing inputs" errors.
+  // Inscribe result on-chain — relay event fires only after confirmed broadcast.
+  // No artificial delay needed: send() now awaits ARC confirmation, so the bid tx
+  // (queued before this) is already stored in ARC by the time we get here.
   ;(async () => {
     try {
-      await sleep(400)
-      // Zero-output inscription: OP_RETURN + fee only. No dust UTXO created.
-      await walletSend(
+      const inscTxid = await walletSend(
         [],
         opReturnResult(taskId, agent.identityKey, label, confidence.toFixed(2))
       )
       txOnChain++
+      relay.resultDelivered(taskId, taskId, agent.identityKey, `labeler-${INSTANCE_ID}`, `${label} (${Math.round(confidence * 100)}%)`)
+      agent.log(`⛓ INSCRIPTION: https://whatsonchain.com/tx/${inscTxid}`)
     } catch (err) {
       agent.log(`⚠ Result inscription failed for ${taskId}: ${err.message}`)
     }

@@ -16,6 +16,10 @@ import { PrivateKey, PublicKey, P2PKH, Transaction, Script, SatoshisPerKilobyte 
 const WOC_BASE = 'https://api.whatsonchain.com/v1/bsv/main'
 const FEE_RATE_SAT_PER_KB = 200  // 0.2 sat/byte — reliable next-block confirmation on BSV mainnet
 
+// Max unconfirmed ancestors before we must wait for a block.
+// BSV standard mempool policy is 25; we use 20 as a safety margin.
+const MAX_CHAIN_DEPTH = 20
+
 // ── BsvWallet ────────────────────────────────────────────────────────────────
 
 export class BsvWallet {
@@ -64,6 +68,7 @@ export class BsvWallet {
         vout:     u.tx_pos,
         satoshis: u.value,
         script:   myScriptHex,
+        depth:    0,   // confirmed on-chain — chain depth resets to 0
       }))
   }
 
@@ -116,6 +121,7 @@ export class BsvWallet {
           vout:     u.vout ?? u.tx_pos ?? 0,
           satoshis: u.satoshis ?? u.value,
           script:   myScript.toHex(),
+          depth:    0,   // confirmed on-chain
         }))
       if (added.length > 0) {
         this._utxos.push(...added)
@@ -128,10 +134,21 @@ export class BsvWallet {
   // because send() builds inputs using local satoshis + lockingScript directly.
   async warmCache() {}
 
-  // Pick UTXOs to cover target amount + estimated fee, mark as locked
+  // Pick UTXOs to cover target amount + estimated fee, mark as locked.
+  // Prefers shallow-chain UTXOs (depth < MAX_CHAIN_DEPTH) so we never build
+  // unconfirmed chains longer than miners will accept.
   _selectUtxos(targetSats) {
     const available = this._utxos.filter(u => !this._locked.has(u.txid + ':' + u.vout))
-    available.sort((a, b) => b.satoshis - a.satoshis)  // largest first
+
+    // Sort: shallow first, then largest — minimises chain depth while maximising coverage
+    available.sort((a, b) => (a.depth ?? 0) - (b.depth ?? 0) || b.satoshis - a.satoshis)
+
+    // If every available UTXO is already at the depth limit, the caller must wait
+    // for a block before we can safely build another chained tx.
+    const shallowest = available[0]?.depth ?? 0
+    if (available.length > 0 && shallowest >= MAX_CHAIN_DEPTH) {
+      throw new Error(`CHAIN_DEPTH_LIMIT: all UTXOs at depth ${shallowest} — refresh after next block`)
+    }
 
     const selected = []
     let total = 0
@@ -237,10 +254,13 @@ export class BsvWallet {
         this._recentTxHex.delete(this._recentTxHex.keys().next().value)
       }
 
-      // Update local UTXO pool BEFORE broadcasting.
-      // This is the key to high throughput: the next send() sees the change output
-      // immediately and can chain from it without waiting 1-3s for the broadcast.
-      // BSV's ARC handles chained mempool transactions natively.
+      // Compute the chain depth of the change output.
+      // Change chains from the deepest selected input — +1 per unconfirmed hop.
+      const parentDepth = selected.reduce((max, u) => Math.max(max, u.depth ?? 0), 0)
+      const changeDepth = parentDepth + 1
+
+      // Update local UTXO pool BEFORE broadcasting so the next queue slot can
+      // immediately chain from the change output — ARC handles unconfirmed chains.
       this._utxos = this._utxos.filter(u =>
         !selected.some(s => s.txid === u.txid && s.vout === u.vout)
       )
@@ -248,48 +268,71 @@ export class BsvWallet {
       if (changeOut && changeOut.satoshis > 0) {
         this._utxos.push({
           txid,
-          vout:     tx.outputs.length - 1,
+          vout:     changeIndex,
           satoshis: changeOut.satoshis,
           script:   myScript.toHex(),
+          depth:    changeDepth,
         })
       }
-      // Release the UTXO lock immediately — spent locally, no longer needed.
       this._unlock(selected)
 
-      // Fire-and-forget broadcast. Don't await — return txid immediately so the
-      // caller's queue can process the next payment without waiting for the network.
-      // On failure: retry broadcast 2× then reset UTXO pool from WoC.
-      // Retries handle transient ARC/network blips without breaking the chain.
-      // Pool reset uses _recentlySpentOutpoints() to avoid reloading already-spent UTXOs.
-      this._broadcast(tx).catch(async err => {
+      // Await broadcast — we must know the tx actually landed in ARC before
+      // returning txid to the caller.  Without this, the caller fires relay events
+      // and increments on-chain counters for txs that were never sent.
+      // On failure: retry 2× with back-off, then reset UTXO pool from WoC so the
+      // next send() starts from a clean confirmed state.
+      try {
+        await this._broadcast(tx)
+      } catch (err) {
         process.stderr.write(`\n[BROADCAST FAIL] txid=${txid.slice(0, 16)} err=${err.message}\n`)
-        console.error(`[wallet] broadcast failed ${txid.slice(0, 12)}: ${err.message}`)
-        // Retry twice before declaring chain broken
+        // Retry twice with back-off
+        let retried = false
         for (let i = 1; i <= 2; i++) {
           await sleep(i * 2000)
-          try { await this._broadcast(tx); return } catch { /* continue */ }
+          try { await this._broadcast(tx); retried = true; break } catch { /* next */ }
         }
-        if (!this._chainBroken) {
-          this._chainBroken = true
-          setTimeout(async () => {
-            try {
-              await this.refreshUtxos(true)
-              console.error(`[wallet] UTXO pool reset after chain break — ${this._utxos.length} UTXOs restored`)
-            } catch (e) {
-              console.error(`[wallet] UTXO reset failed: ${e.message}`)
-            } finally {
-              this._chainBroken = false
-            }
-          }, 2000)
+        if (!retried) {
+          // Remove the change UTXO we optimistically added — tx didn't land
+          this._utxos = this._utxos.filter(u => !(u.txid === txid && u.vout === changeIndex))
+          if (!this._chainBroken) {
+            this._chainBroken = true
+            setTimeout(async () => {
+              try {
+                await this.refreshUtxos(true)
+                console.error(`[wallet] UTXO pool reset after broadcast failure — ${this._utxos.length} UTXOs restored`)
+              } catch (e) {
+                console.error(`[wallet] UTXO reset failed: ${e.message}`)
+              } finally {
+                this._chainBroken = false
+              }
+            }, 2000)
+          }
+          throw new Error(`Broadcast failed (3 attempts): ${err.message}`)
         }
-      })
+      }
 
       return txid
 
     } catch (err) {
       this._unlock(selected)
-      // If we ran out of funds, try GorillaPool first (no UTXO cap — finds topup UTXOs
-      // hidden behind 1000 dust entries in WoC), then fall back to WoC /unspent.
+
+      // Chain depth limit hit — all our UTXOs are unconfirmed chains too deep for
+      // miners to accept. Refresh from WoC to get confirmed UTXOs, then retry once.
+      if (err.message.startsWith('CHAIN_DEPTH_LIMIT') && !this._chainBroken) {
+        console.error(`[wallet] chain depth limit — waiting for confirmation then retrying`)
+        this._chainBroken = true
+        await sleep(15_000)  // give the mempool 15s to get a block
+        try {
+          await this.refreshUtxos(true)
+          console.error(`[wallet] chain reset — ${this._utxos.length} confirmed UTXOs`)
+        } finally {
+          this._chainBroken = false
+        }
+        // Retry the send with fresh confirmed UTXOs
+        return this.send(outputs, opReturn)
+      }
+
+      // Ran out of funds — pull in any large UTXOs GorillaPool can see that WoC hides
       if (err.message.startsWith('Insufficient funds') && !this._chainBroken) {
         this._chainBroken = true
         setTimeout(async () => {
@@ -329,35 +372,40 @@ export class BsvWallet {
     // WoC-connected nodes. Parallel submission ensures both mining pools see
     // every tx immediately. We consider broadcast successful if EITHER accepts.
     //
-    // CRITICAL: every fetch gets a 25s timeout via AbortSignal.timeout().
-    // Without this, a hung ARC/WoC connection deadlocks the wallet queue forever —
-    // the promise never resolves, all subsequent sends pile up, nothing moves.
+    // X-WaitFor: STORED — ARC blocks the response until the tx is stored in its
+    // own mempool (not just received at the HTTP layer). This confirms the tx is
+    // actually accepted, not just ACK'd by the load balancer.
+    //
+    // Every fetch gets a 30s timeout. Without this, a hung connection deadlocks
+    // the wallet queue forever.
     const arcPromise = (async () => {
       try {
-        // Use bulk endpoint for chains, single for standalone txs
+        // Use bulk endpoint for chains so ARC gets parent before child
         if (chain.length > 1) {
           const resp = await fetch('https://arc.gorillapool.io/v1/txs', {
             method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-WaitFor': 'STORED' },
             body:    JSON.stringify(chain),
-            signal:  AbortSignal.timeout(25_000),
+            signal:  AbortSignal.timeout(30_000),
           })
           const body = await resp.text()
-          if (resp.ok) return true
+          if (resp.ok) return _arcBodyOk(body, txid)
           if (body.includes('already') || body.includes('txn-already-in-mempool')) return true
         }
-        // Single-tx endpoint (first tx in chain or bulk fallback)
+        // Single-tx fallback
         const resp = await fetch('https://arc.gorillapool.io/v1/tx', {
           method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-WaitFor': 'STORED' },
           body:    JSON.stringify({ rawTx: hex }),
-          signal:  AbortSignal.timeout(25_000),
+          signal:  AbortSignal.timeout(30_000),
         })
         const body = await resp.text()
-        if (resp.ok) return true
+        if (resp.ok) return _arcBodyOk(body, txid)
         if (body.includes('already') || body.includes('txn-already-in-mempool')) return true
+        process.stderr.write(`[ARC] ${resp.status}: ${body.slice(0, 120)}\n`)
         return false
-      } catch {
+      } catch (e) {
+        process.stderr.write(`[ARC] fetch error: ${e.message}\n`)
         return false
       }
     })()
@@ -368,24 +416,25 @@ export class BsvWallet {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({ txhex: hex }),
-          signal:  AbortSignal.timeout(25_000),
+          signal:  AbortSignal.timeout(30_000),
         })
         const body = await resp.text()
         if (resp.ok) return true
         if (body.includes('already') || body.includes('txn-already-in-mempool')) return true
-        // WoC 429 — back off and retry once
         if (resp.status === 429) {
-          await sleep(1000)
+          await sleep(1500)
           const r2 = await fetch(`${WOC_BASE}/tx/raw`, {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ txhex: hex }),
-            signal:  AbortSignal.timeout(25_000),
+            signal:  AbortSignal.timeout(30_000),
           })
           return r2.ok
         }
+        process.stderr.write(`[WoC] ${resp.status}: ${body.slice(0, 120)}\n`)
         return false
-      } catch {
+      } catch (e) {
+        process.stderr.write(`[WoC] fetch error: ${e.message}\n`)
         return false
       }
     })()
@@ -397,6 +446,12 @@ export class BsvWallet {
     throw new Error(`Broadcast failed on all endpoints (arc=${arcOk} woc=${wocOk})`)
   }
 
+  // Parse ARC JSON response and confirm our txid was accepted (not rejected).
+  // ARC bulk endpoint returns an array; single endpoint returns an object.
+  // Returns true if tx was stored/accepted, false if explicitly rejected.
+  // Falls back to true on non-JSON responses so a schema change doesn't break us.
+
+  // (defined as a free function below — see _arcBodyOk)
   balance() {
     return this._utxos
       .filter(u => !this._locked.has(u.txid + ':' + u.vout))
@@ -466,7 +521,7 @@ export class BsvWallet {
       this._utxos = this._utxos.filter(u =>
         !toConsolidate.some(c => c.txid === u.txid && c.vout === u.vout)
       )
-      this._utxos.push({ txid, vout: 0, satoshis: outSats, script: myScript.toHex() })
+      this._utxos.push({ txid, vout: 0, satoshis: outSats, script: myScript.toHex(), depth: 1 })
       this._unlock(toConsolidate)
 
       this._recentTxHex.set(txid, tx.toHex())
@@ -501,6 +556,28 @@ export class BsvWallet {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms))
+}
+
+// Parse ARC's JSON response and check our txid was actually stored.
+// ARC bulk endpoint → array; single endpoint → object.
+// If txStatus is REJECTED or ERROR we return false so the caller retries.
+// Unknown shapes fall back to true (trust HTTP 200).
+function _arcBodyOk(body, txid) {
+  try {
+    const json = JSON.parse(body)
+    const items = Array.isArray(json) ? json : [json]
+    // Find entry matching our txid (bulk may include parent entries)
+    const entry = items.find(i => i.txid === txid) ?? items[items.length - 1]
+    if (!entry) return true  // no matching entry — trust HTTP 200
+    const status = entry.txStatus ?? entry.status ?? ''
+    if (status === 'REJECTED' || status === 'ERROR') {
+      process.stderr.write(`[ARC] txStatus=${status} extraInfo=${entry.extraInfo ?? ''}\n`)
+      return false
+    }
+    return true
+  } catch {
+    return true  // non-JSON — trust HTTP 200
+  }
 }
 
 // ── Address derivation ───────────────────────────────────────────────────────

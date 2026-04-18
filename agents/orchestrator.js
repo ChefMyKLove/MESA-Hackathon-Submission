@@ -125,7 +125,7 @@ function flushBatch() {
       const txid = await wallet.send(outputs, opReturn)
       agent.log(`💸 PAYMENT TX: https://whatsonchain.com/tx/${txid}  (${batch.length} labelers, ${batch.length * SATS.LABEL_REWARD} sats)`)
 
-      txCount   += batch.length
+      txCount   += 1             // 1 batch tx regardless of how many labelers it pays
       tasksDone += batch.length
 
       for (const p of batch) {
