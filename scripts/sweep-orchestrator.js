@@ -1,23 +1,35 @@
 /**
  * scripts/sweep-orchestrator.js
  *
- * Sweeps the MESA-Prime orchestrator wallet back to a single UTXO.
- * WoC /unspent caps at 1000 and is useless for high-UTXO wallets.
- * This script uses GorillaPool (no cap) paginated UTXO fetch.
+ * Sweeps any BSV wallet back to a single UTXO.
+ * WoC /unspent caps at 1000 — useless for high-UTXO wallets.
+ * Uses GorillaPool → Bitails → WoC in fallback order for full UTXO enumeration.
  *
  * Strategy:
  *   Round 1: fetch ALL UTXOs, batch 400 at a time → N consolidation txs
- *   Round 2: consolidate N outputs → 1 final UTXO
+ *   Round 2: if ≤ 20 batches, chains immediately via ARC bulk.
+ *            if > 20 batches, wait for next block then re-run.
  *
  * Usage:
  *   node --env-file=.env.orchestrator scripts/sweep-orchestrator.js
- *   node --env-file=.env.orchestrator scripts/sweep-orchestrator.js --to 1SomeAddress
+ *   node scripts/sweep-orchestrator.js --key <privkey_hex> [--to <address>]
+ *
+ * Examples:
+ *   # Sweep old orchestrator to current one:
+ *   node scripts/sweep-orchestrator.js \
+ *     --key 9b080c6221282881e08d631fe9c225360b32db6dadc0f917ecf760f39a15b746 \
+ *     --to 1CXWMmLfqF68jHtLiUGcm4hYW5Me75CUaX
  */
 import { PrivateKey, P2PKH, Transaction, SatoshisPerKilobyte } from '@bsv/sdk'
 
-const KEY = process.env.AGENT_KEY
+const KEY = (() => {
+  const idx = process.argv.indexOf('--key')
+  return idx >= 0 ? process.argv[idx + 1] : process.env.AGENT_KEY
+})()
+
 if (!KEY) {
   console.error('Usage: node --env-file=.env.orchestrator scripts/sweep-orchestrator.js')
+  console.error('   or: node scripts/sweep-orchestrator.js --key <privkey_hex> [--to <address>]')
   process.exit(1)
 }
 
@@ -45,55 +57,100 @@ if (DST_ADDRESS) console.log(`   → Destination: ${dstAddr}`)
 else             console.log(`   → Sweeping back to self`)
 console.log()
 
-// ── Step 1: Fetch ALL confirmed UTXOs from GorillaPool ───────────────────────
+// ── Step 1: Fetch ALL confirmed UTXOs ────────────────────────────────────────
+// Try GorillaPool → Bitails → WoC in order.
+// GorillaPool and Bitails both support pagination and have no hard cap.
+// WoC is the last resort — caps at 1000, so for wallets with 100K+ UTXOs
+// it only returns a fraction (oldest/smallest first).
 
-async function fetchAllUtxos() {
-  console.log('① Fetching UTXOs from GorillaPool (no cap)...')
+async function fetchGorillaPool() {
   const all = []
   let offset = 0
   const limit = 1000
+  const base  = `https://v3.ordinals.gorillapool.io/utxos/${address}?bsv20=false`
 
   while (true) {
-    const url = `${GP_UTXOS}&limit=${limit}&offset=${offset}`
     try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(60_000) })
-      if (!r.ok) {
-        console.log(`   GorillaPool HTTP ${r.status} at offset ${offset}`)
-        break
-      }
+      const r = await fetch(`${base}&limit=${limit}&offset=${offset}`, { signal: AbortSignal.timeout(60_000) })
+      if (!r.ok) { console.log(`   GorillaPool HTTP ${r.status} at offset ${offset}`); break }
       const data = await r.json()
       const rows = Array.isArray(data) ? data : (data?.utxos ?? data?.data ?? [])
       if (rows.length === 0) break
-
       for (const u of rows) {
         const txid = u.txid ?? u.tx_hash
         const vout = u.vout ?? u.tx_pos ?? 0
         const sats = u.satoshis ?? u.value ?? 0
         if (txid && sats > 0) all.push({ txid, vout, satoshis: sats })
       }
-
-      console.log(`   offset ${offset.toLocaleString().padStart(7)}: +${rows.length} UTXOs (total: ${all.length.toLocaleString()})`)
-
+      process.stdout.write(`\r   GorillaPool: ${all.length.toLocaleString()} UTXOs fetched...`)
       if (rows.length < limit) break
       offset += limit
-      await sleep(300)
+      await sleep(250)
     } catch (err) {
-      console.log(`   Fetch error at offset ${offset}: ${err.message}`)
-      if (all.length > 0) break   // use what we have
-      throw err
+      console.log(`\n   GorillaPool error at offset ${offset}: ${err.message}`)
+      break
     }
   }
+  if (all.length > 0) process.stdout.write('\n')
+  return all
+}
 
-  // Fallback to WoC if GorillaPool returned nothing (unlikely but safe)
-  if (all.length === 0) {
-    console.log('   GorillaPool returned 0 — falling back to WoC (capped at 1000)...')
-    const r = await fetch(`${WOC}/address/${address}/unspent`)
-    if (!r.ok) throw new Error(`WoC /unspent failed: ${r.status}`)
-    const raw = await r.json()
-    for (const u of raw) all.push({ txid: u.tx_hash, vout: u.tx_pos, satoshis: u.value })
+async function fetchBitails() {
+  const all = []
+  let offset = 0
+  const limit = 1000
+
+  while (true) {
+    try {
+      const r = await fetch(
+        `https://api.bitails.io/address/${address}/unspent?limit=${limit}&offset=${offset}`,
+        { signal: AbortSignal.timeout(60_000) }
+      )
+      if (!r.ok) { console.log(`   Bitails HTTP ${r.status} at offset ${offset}`); break }
+      const data  = await r.json()
+      const rows  = Array.isArray(data) ? data : (data?.unspent ?? data?.utxos ?? data?.data ?? [])
+      if (rows.length === 0) break
+      for (const u of rows) {
+        const txid = u.txid ?? u.tx_hash
+        const vout = u.vout ?? u.tx_pos ?? u.n ?? 0
+        const sats = u.satoshis ?? u.value ?? 0
+        if (txid && sats > 0) all.push({ txid, vout, satoshis: sats })
+      }
+      process.stdout.write(`\r   Bitails: ${all.length.toLocaleString()} UTXOs fetched...`)
+      if (rows.length < limit) break
+      offset += limit
+      await sleep(400)
+    } catch (err) {
+      console.log(`\n   Bitails error at offset ${offset}: ${err.message}`)
+      break
+    }
+  }
+  if (all.length > 0) process.stdout.write('\n')
+  return all
+}
+
+async function fetchAllUtxos() {
+  console.log('① Fetching UTXOs — trying GorillaPool, Bitails, WoC in order...\n')
+
+  let all = await fetchGorillaPool()
+  if (all.length > 0) { console.log(`   GorillaPool: ${all.length.toLocaleString()} UTXOs total`); return all }
+
+  console.log('   GorillaPool returned 0 — trying Bitails...')
+  all = await fetchBitails()
+  if (all.length > 0) { console.log(`   Bitails: ${all.length.toLocaleString()} UTXOs total`); return all }
+
+  console.log('   Bitails returned 0 — falling back to WoC (CAPPED AT 1000)...')
+  const r = await fetch(`${WOC}/address/${address}/unspent`)
+  if (!r.ok) throw new Error(`WoC /unspent failed: ${r.status}`)
+  const raw = await r.json()
+  for (const u of raw) all.push({ txid: u.tx_hash, vout: u.tx_pos, satoshis: u.value })
+  if (all.length >= 1000) {
+    console.log(`   ⚠ WoC returned ${all.length} UTXOs — likely capped. Actual UTXO count is much higher.`)
+    console.log('   ⚠ This sweep will only recover a fraction of the balance.')
+    console.log('   ⚠ Re-run when GorillaPool or Bitails is back online for a full sweep.')
+  } else {
     console.log(`   WoC returned ${all.length} UTXOs`)
   }
-
   return all
 }
 
