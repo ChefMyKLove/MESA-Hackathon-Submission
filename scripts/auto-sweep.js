@@ -84,6 +84,7 @@ async function fetchUtxos() {
   }
 
   // Bitails fallback (top 1000 by value, broken pagination — single page only)
+  const bitailsUtxos = []
   if (!gpOk) {
     try {
       const r = await fetch(
@@ -98,23 +99,41 @@ async function fetchUtxos() {
           const vout = u.vout ?? u.tx_pos ?? 0
           const sats = u.satoshis ?? u.value ?? 0
           const key  = `${txid}:${vout}`
-          if (txid && sats > 0 && !seen.has(key)) { seen.add(key); all.push({ txid, vout, satoshis: sats }) }
+          if (txid && sats > 0 && !seen.has(key)) { seen.add(key); bitailsUtxos.push({ txid, vout, satoshis: sats }) }
         }
-        if (all.length > 0) console.log(`  Bitails: ${all.length} UTXOs (top 1000 by value)`)
       }
     } catch {}
   }
 
-  // WoC final fallback
-  if (all.length === 0) {
+  // WoC — always try when GorillaPool is down; returns oldest 1000 UTXOs (different set than Bitails)
+  const wocUtxos = []
+  if (!gpOk) {
     try {
       const r = await fetch(`${WOC}/address/${address}/unspent`, { signal: AbortSignal.timeout(20_000) })
       if (r.ok) {
         const rows = await r.json()
-        for (const u of rows) all.push({ txid: u.tx_hash, vout: u.tx_pos, satoshis: u.value })
-        if (all.length > 0) console.log(`  WoC: ${all.length} UTXOs (capped at 1000)`)
+        for (const u of rows) {
+          const key = `${u.tx_hash}:${u.tx_pos}`
+          if (!seen.has(key)) wocUtxos.push({ txid: u.tx_hash, vout: u.tx_pos, satoshis: u.value })
+        }
       }
     } catch {}
+  }
+
+  // Pick whichever source has more total value — WoC often has real UTXOs when Bitails shows only dust
+  if (!gpOk) {
+    const bitailsTotal = bitailsUtxos.reduce((s, u) => s + u.satoshis, 0)
+    const wocTotal     = wocUtxos.reduce((s, u) => s + u.satoshis, 0)
+    if (wocTotal > bitailsTotal) {
+      all.push(...wocUtxos)
+      console.log(`  WoC: ${wocUtxos.length} UTXOs  ${wocTotal.toLocaleString()} sats (beat Bitails ${bitailsTotal.toLocaleString()} sats)`)
+    } else if (bitailsUtxos.length > 0) {
+      all.push(...bitailsUtxos)
+      console.log(`  Bitails: ${bitailsUtxos.length} UTXOs  ${bitailsTotal.toLocaleString()} sats`)
+    } else if (wocUtxos.length > 0) {
+      all.push(...wocUtxos)
+      console.log(`  WoC: ${wocUtxos.length} UTXOs  ${wocTotal.toLocaleString()} sats`)
+    }
   }
 
   return all
