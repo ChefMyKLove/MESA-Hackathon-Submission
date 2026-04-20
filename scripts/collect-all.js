@@ -30,6 +30,11 @@ const ENV_FILES = [
   '.env.labeler6',  '.env.labeler7',  '.env.labeler8',  '.env.labeler9',  '.env.labeler10',
 ]
 
+// Extra wallets not in any .env file — swept manually, funds may have landed here
+const EXTRA_KEYS = [
+  { key: '9b080c6221282881e08d631fe9c225360b32db6dadc0f917ecf760f39a15b746', label: 'old-orchestrator' },
+]
+
 const WOC      = 'https://api.whatsonchain.com/v1/bsv/main'
 const ARC      = 'https://arc.gorillapool.io/v1/tx'
 const FEE_RATE = 500  // sat/KB
@@ -147,6 +152,14 @@ for (const file of ENV_FILES) {
   const label   = file.replace('.env.', '')
 
   const swept = await sweep(priv, address, label)
+  totalSwept += swept
+  await sleep(600)
+}
+
+for (const { key, label } of EXTRA_KEYS) {
+  const priv    = PrivateKey.fromHex(key)
+  const address = priv.toPublicKey().toAddress('mainnet').toString()
+  const swept   = await sweep(priv, address, label)
   totalSwept += swept
   await sleep(600)
 }
