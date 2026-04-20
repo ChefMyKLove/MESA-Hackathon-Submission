@@ -41,38 +41,78 @@ console.log(`\n🔁 Auto-Sweep — ${address}`)
 console.log(`   → ${DST}`)
 console.log(`   Interval: 15 min between rounds\n`)
 
-// ── UTXO fetch (Bitails → WoC fallback) ──────────────────────────────────────
+// ── UTXO fetch (GorillaPool paginated → Bitails → WoC fallback) ──────────────
 
 async function fetchUtxos() {
   const seen = new Set()
   const all  = []
 
-  // Bitails
+  // GorillaPool — paginated, no hard cap, fastest drain
+  let gpOk = false
   try {
-    const r = await fetch(
-      `https://api.bitails.io/address/${address}/unspent?limit=1000&offset=0`,
-      { signal: AbortSignal.timeout(30_000) }
-    )
-    if (r.ok) {
-      const data = await r.json()
-      const rows = Array.isArray(data) ? data : (data?.unspent ?? data?.utxos ?? [])
+    const LIMIT = 1000
+    let offset  = 0
+    let pages   = 0
+    while (pages < 300) {  // safety cap: 300K UTXOs max
+      const r = await fetch(
+        `https://v3.ordinals.gorillapool.io/utxos/${address}?bsv20=false&limit=${LIMIT}&offset=${offset}`,
+        { signal: AbortSignal.timeout(30_000) }
+      )
+      if (!r.ok) break
+      const rows = await r.json()
+      if (!Array.isArray(rows) || rows.length === 0) break
+      let added = 0
       for (const u of rows) {
         const txid = u.txid ?? u.tx_hash
-        const vout = u.vout ?? u.tx_pos ?? 0
+        const vout = u.vout ?? u.outputIndex ?? u.tx_pos ?? 0
         const sats = u.satoshis ?? u.value ?? 0
         const key  = `${txid}:${vout}`
-        if (txid && sats > 0 && !seen.has(key)) { seen.add(key); all.push({ txid, vout, satoshis: sats }) }
+        if (txid && sats > 0 && !seen.has(key)) { seen.add(key); all.push({ txid, vout, satoshis: sats }); added++ }
       }
+      pages++
+      if (rows.length < LIMIT) break   // last page
+      if (added === 0) break            // broken pagination guard
+      offset += LIMIT
+      await sleep(150)                  // gentle rate-limit
     }
-  } catch {}
+    if (all.length > 0) {
+      gpOk = true
+      console.log(`  GorillaPool: ${all.length.toLocaleString()} UTXOs (${pages} pages)`)
+    }
+  } catch (e) {
+    console.log(`  GorillaPool error: ${e.message} — trying Bitails`)
+  }
 
-  // WoC fallback
+  // Bitails fallback (top 1000 by value, broken pagination — single page only)
+  if (!gpOk) {
+    try {
+      const r = await fetch(
+        `https://api.bitails.io/address/${address}/unspent?limit=1000&offset=0`,
+        { signal: AbortSignal.timeout(30_000) }
+      )
+      if (r.ok) {
+        const data = await r.json()
+        const rows = Array.isArray(data) ? data : (data?.unspent ?? data?.utxos ?? [])
+        for (const u of rows) {
+          const txid = u.txid ?? u.tx_hash
+          const vout = u.vout ?? u.tx_pos ?? 0
+          const sats = u.satoshis ?? u.value ?? 0
+          const key  = `${txid}:${vout}`
+          if (txid && sats > 0 && !seen.has(key)) { seen.add(key); all.push({ txid, vout, satoshis: sats }) }
+        }
+        if (all.length > 0) console.log(`  Bitails: ${all.length} UTXOs (top 1000 by value)`)
+      }
+    } catch {}
+  }
+
+  // WoC final fallback
   if (all.length === 0) {
     try {
       const r = await fetch(`${WOC}/address/${address}/unspent`, { signal: AbortSignal.timeout(20_000) })
       if (r.ok) {
         const rows = await r.json()
         for (const u of rows) all.push({ txid: u.tx_hash, vout: u.tx_pos, satoshis: u.value })
+        if (all.length > 0) console.log(`  WoC: ${all.length} UTXOs (capped at 1000)`)
       }
     } catch {}
   }
