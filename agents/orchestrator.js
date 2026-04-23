@@ -249,10 +249,10 @@ setInterval(async () => {
     `tx/sec: ${txPerSec} | 24h proj: ${projected24h.toLocaleString()} | done: ${tasksDone}`
   )
 
-  // Auto-consolidate if dust accumulation is getting out of hand.
-  // Threshold 150: fires before the wallet has enough dust to cause broadcast failures.
-  if (utxoCount > 150) {
-    wallet.consolidateIfNeeded(150).catch(err =>
+  // Auto-consolidate only if UTXOs grow far beyond the fanout count.
+  // Threshold 2000: prevents unbounded accumulation without destroying fanout UTXOs.
+  if (utxoCount > 2000) {
+    wallet.consolidateIfNeeded(2000).catch(err =>
       agent.log(`⚠ consolidation error: ${err.message}`)
     )
   }

@@ -472,7 +472,9 @@ export class BsvWallet {
     if (available.length <= threshold) return null
 
     // Take up to maxInputs (largest first so we preserve the most value per tx)
-    const toConsolidate = available.sort((a, b) => b.satoshis - a.satoshis).slice(0, maxInputs)
+    // Only merge the EXCESS UTXOs — keep `threshold` in the pool so payments continue.
+    const excess = available.length - threshold
+    const toConsolidate = available.sort((a, b) => b.satoshis - a.satoshis).slice(0, Math.min(excess, maxInputs))
     const total = toConsolidate.reduce((s, u) => s + u.satoshis, 0)
 
     console.log(`[wallet] auto-consolidate: ${available.length} UTXOs → merging ${toConsolidate.length} (${total} sats)`)
