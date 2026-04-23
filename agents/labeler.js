@@ -35,7 +35,7 @@ const INSTANCE_ID = process.env.INSTANCE_ID || '1'
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 
-const agent   = new MesaAgent(`labeler-${INSTANCE_ID}`)
+const agent   = new MesaAgent(process.env.AGENT_NAME || `labeler-${INSTANCE_ID}`)
 const wallet  = new BsvWallet(process.env.AGENT_KEY)
 
 // Load DistilBERT ML model FIRST — runs locally, no API. All 10 instances share

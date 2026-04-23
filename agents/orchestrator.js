@@ -53,7 +53,7 @@ let startTime   = Date.now()
 // Wait for relay to be ready — concurrently starts all processes simultaneously
 await new Promise(r => setTimeout(r, 3000))
 
-const agent = new MesaAgent('orchestrator')
+const agent = new MesaAgent(process.env.AGENT_NAME || 'orchestrator')
 await agent.init()
 
 const wallet = new BsvWallet(process.env.AGENT_KEY)
