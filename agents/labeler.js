@@ -60,6 +60,35 @@ if (wallet.balance() < 5_000) {
   agent.log(`  Need at least 20,000 sats for a full 24h run (covers ~13,600 bid txs @ 1 sat + fees)`)
 }
 
+// ── Auto-fanout: ensure enough UTXOs for sustained parallel bids ──────────────
+// 4 queues × ~2 tx/sec = 8 tx/sec. Each UTXO chain maxes at depth 20.
+// We need UTXOs × 20 depth ≥ 600 seconds × 8 tx/sec = 4,800 txs per block interval.
+// 300 UTXOs × 20 = 6,000 txs — safely covers a 10-min block with headroom.
+const LABELER_TARGET_UTXOS = 300
+const LABELER_FANOUT_SAT   = 10_000  // 10k sats each — enough for 20 chained OP_RETURN txs
+
+if (wallet._utxos.length < LABELER_TARGET_UTXOS && wallet.balance() >= LABELER_FANOUT_SAT * 2) {
+  const needed    = LABELER_TARGET_UTXOS - wallet._utxos.length
+  const canCreate = Math.min(needed, Math.floor((wallet.balance() - 50_000) / LABELER_FANOUT_SAT))
+  agent.log(`⚡ Auto-fanout: ${wallet._utxos.length} UTXOs — splitting into ${canCreate + wallet._utxos.length}`)
+  let created = 0
+  const BATCH = 50
+  while (created < canCreate) {
+    const batchSize = Math.min(BATCH, canCreate - created)
+    const outputs = Array.from({ length: batchSize }, () => ({ address: wallet.address_str, satoshis: LABELER_FANOUT_SAT }))
+    try {
+      await wallet.send(outputs)
+      created += batchSize
+      await new Promise(r => setTimeout(r, 1_500))
+      await wallet.refreshUtxos(true)
+    } catch (err) {
+      agent.log(`⚡ Auto-fanout batch failed: ${err.message} — continuing with ${wallet._utxos.length} UTXOs`)
+      break
+    }
+  }
+  agent.log(`⚡ Auto-fanout complete — ${wallet._utxos.length} UTXOs ready`)
+}
+
 // Stats
 let bidsSubmitted  = 0
 let tasksCompleted = 0

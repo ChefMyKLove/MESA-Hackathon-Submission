@@ -342,19 +342,26 @@ export class BsvWallet {
         return this.send(outputs, opReturn)
       }
 
-      // Chain depth limit hit — all our UTXOs are unconfirmed chains too deep for
-      // miners to accept. Refresh from WoC to get confirmed UTXOs, then retry once.
+      // Chain depth limit hit — all UTXOs are unconfirmed chains too deep.
+      // Poll WoC for a new block (up to 15 min), then refresh confirmed UTXOs.
       if (err.message.startsWith('CHAIN_DEPTH_LIMIT') && !this._chainBroken) {
-        console.error(`[wallet] chain depth limit — waiting for confirmation then retrying`)
         this._chainBroken = true
-        await sleep(15_000)  // give the mempool 15s to get a block
+        console.error(`[wallet] chain depth limit — polling for next block (up to 15 min)`)
         try {
+          const startHeight = await this._getBlockHeight()
+          const deadline = Date.now() + 15 * 60_000
+          while (Date.now() < deadline) {
+            await sleep(15_000)
+            try {
+              const h = await this._getBlockHeight()
+              if (h > startHeight) break
+            } catch { /* keep polling */ }
+          }
           await this.refreshUtxos(true)
-          console.error(`[wallet] chain reset — ${this._utxos.length} confirmed UTXOs`)
+          console.error(`[wallet] block arrived — ${this._utxos.length} confirmed UTXOs restored`)
         } finally {
           this._chainBroken = false
         }
-        // Retry the send with fresh confirmed UTXOs
         return this.send(outputs, opReturn)
       }
 
@@ -375,6 +382,13 @@ export class BsvWallet {
       }
       throw err
     }
+  }
+
+  async _getBlockHeight() {
+    const r = await fetch(`${WOC_BASE}/chain/info`, { signal: AbortSignal.timeout(10_000) })
+    if (!r.ok) throw new Error(`WoC chain/info ${r.status}`)
+    const j = await r.json()
+    return j.blocks
   }
 
   async _broadcast(tx) {
