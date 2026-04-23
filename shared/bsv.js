@@ -284,6 +284,26 @@ export class BsvWallet {
       try {
         await this._broadcast(tx)
       } catch (err) {
+        // Mempool conflict: the inputs we selected are already spent in the mempool.
+        // This happens after a restart when WoC's unspent index lags behind.
+        // Don't retry the same tx — immediately drop the stale UTXOs and refresh.
+        if (err.message === 'MEMPOOL_CONFLICT') {
+          this._utxos = this._utxos.filter(u => !(u.txid === txid && u.vout === changeIndex))
+          // Also purge the conflicting inputs so they aren't re-selected
+          this._utxos = this._utxos.filter(u =>
+            !selected.some(s => s.txid === u.txid && s.vout === u.vout)
+          )
+          if (!this._chainBroken) {
+            this._chainBroken = true
+            try {
+              await this.refreshUtxos(true)
+              console.error(`[wallet] UTXO pool refreshed after mempool-conflict — ${this._utxos.length} UTXOs`)
+            } finally {
+              this._chainBroken = false
+            }
+          }
+          throw new Error('MEMPOOL_CONFLICT: inputs already spent — UTXOs refreshed')
+        }
         process.stderr.write(`\n[BROADCAST FAIL] txid=${txid.slice(0, 16)} err=${err.message}\n`)
         // Retry twice with back-off
         let retried = false
@@ -315,6 +335,12 @@ export class BsvWallet {
 
     } catch (err) {
       this._unlock(selected)
+
+      // Mempool conflict — stale UTXOs were already spent. UTXOs already refreshed
+      // in the inner handler; retry the send immediately with fresh selection.
+      if (err.message.startsWith('MEMPOOL_CONFLICT')) {
+        return this.send(outputs, opReturn)
+      }
 
       // Chain depth limit hit — all our UTXOs are unconfirmed chains too deep for
       // miners to accept. Refresh from WoC to get confirmed UTXOs, then retry once.
@@ -402,6 +428,7 @@ export class BsvWallet {
         const body = await resp.text()
         if (resp.ok) return _arcBodyOk(body, txid)
         if (body.includes('already') || body.includes('txn-already-in-mempool')) return true
+        if (body.includes('mempool-conflict') || body.includes('txn-mempool-conflict')) throw new Error('MEMPOOL_CONFLICT')
         process.stderr.write(`[ARC] ${resp.status}: ${body.slice(0, 120)}\n`)
         return false
       } catch (e) {
@@ -421,6 +448,7 @@ export class BsvWallet {
         const body = await resp.text()
         if (resp.ok) return true
         if (body.includes('already') || body.includes('txn-already-in-mempool')) return true
+        if (body.includes('mempool-conflict') || body.includes('txn-mempool-conflict')) throw new Error('MEMPOOL_CONFLICT')
         if (resp.status === 429) {
           await sleep(1500)
           const r2 = await fetch(`${WOC_BASE}/tx/raw`, {
@@ -439,7 +467,13 @@ export class BsvWallet {
       }
     })()
 
-    const [arcOk, wocOk] = await Promise.all([arcPromise, wocPromise])
+    let arcOk, wocOk
+    try {
+      ;[arcOk, wocOk] = await Promise.all([arcPromise, wocPromise])
+    } catch (e) {
+      if (e.message === 'MEMPOOL_CONFLICT') throw e
+      throw e
+    }
 
     if (arcOk || wocOk) return txid
 
