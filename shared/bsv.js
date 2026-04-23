@@ -14,7 +14,7 @@
 import { PrivateKey, PublicKey, P2PKH, Transaction, Script, SatoshisPerKilobyte } from '@bsv/sdk'
 
 const WOC_BASE = 'https://api.whatsonchain.com/v1/bsv/main'
-const FEE_RATE_SAT_PER_KB = 200  // 0.2 sat/byte — reliable next-block confirmation on BSV mainnet
+const FEE_RATE_SAT_PER_KB = 1000  // 1 sat/byte — ARC minimum; covers all tx sizes including large OP_RETURN
 
 // Max unconfirmed ancestors before we must wait for a block.
 // BSV standard mempool policy is 25; we use 20 as a safety margin.
