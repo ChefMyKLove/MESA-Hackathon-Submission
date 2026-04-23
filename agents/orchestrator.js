@@ -68,6 +68,37 @@ if (wallet.balance() < 10_000) {
   agent.log(`  Need at least 50,000 sats (0.0005 BSV) to start the 24h run.`)
 }
 
+// ── Auto-fanout: ensure enough UTXOs for sustained parallel payments ──────────
+// If we have fewer than TARGET_UTXOS, self-split before starting the payment loop.
+// This handles the case where a block confirmed the previous run's spending txs,
+// leaving only 1 change UTXO — without this, we hit CHAIN_DEPTH_LIMIT after 20 payments.
+const TARGET_UTXOS   = 200   // enough for 200 × 20 depth = 4,000 payments per block interval
+const FANOUT_SAT     = 100_000  // sats per output (same as fanout.js)
+
+if (wallet._utxos.length < TARGET_UTXOS && wallet.balance() >= FANOUT_SAT * 2) {
+  const needed    = TARGET_UTXOS - wallet._utxos.length
+  const canCreate = Math.min(needed, Math.floor((wallet.balance() - 5_000) / FANOUT_SAT))
+  agent.log(`⚡ Auto-fanout: only ${wallet._utxos.length} UTXOs — splitting into ${canCreate + wallet._utxos.length} before start`)
+
+  let created = 0
+  const BATCH = 50
+  while (created < canCreate) {
+    const batchSize = Math.min(BATCH, canCreate - created)
+    const outputs = Array.from({ length: batchSize }, () => ({ address: wallet.address_str, satoshis: FANOUT_SAT }))
+    try {
+      await wallet.send(outputs)
+      created += batchSize
+      agent.log(`⚡ Auto-fanout: ${created}/${canCreate} UTXOs created`)
+      await new Promise(r => setTimeout(r, 1_500))
+      await wallet.refreshUtxos(true)
+    } catch (err) {
+      agent.log(`⚡ Auto-fanout batch failed: ${err.message} — continuing with ${wallet._utxos.length} UTXOs`)
+      break
+    }
+  }
+  agent.log(`⚡ Auto-fanout complete — ${wallet._utxos.length} UTXOs ready`)
+}
+
 // ── Accept registrations ─────────────────────────────────────────────────────
 
 agent.listen(BOXES.REGISTRATIONS, async ({ sender, body }) => {
