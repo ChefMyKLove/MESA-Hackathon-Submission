@@ -12,18 +12,20 @@
  *   node scripts/status.js --once   # single snapshot and exit
  *   node scripts/status.js --orch   # orchestrator only (faster)
  *
- * WoC /unspent UTXO height field:
- *   height > 0  → confirmed in block → safe, depth resets to 0
- *   height == 0 → unconfirmed (mempool) → part of a chain, risk of hitting depth 20
+ * APIs tried in order per wallet: WoC → Bitails → Blockchair
+ * On 429, immediately moves to next API (no retry loop).
+ * Caches last-known data and shows it as "(stale)" when all APIs fail.
  */
 import { PrivateKey } from '@bsv/sdk'
 import { readFileSync } from 'fs'
 
-const WOC   = 'https://api.whatsonchain.com/v1/bsv/main'
-const sleep = ms => new Promise(r => setTimeout(r, ms))
-const ONCE  = process.argv.includes('--once')
+const WOC      = 'https://api.whatsonchain.com/v1/bsv/main'
+const BITAILS  = 'https://api.bitails.io'
+const BLOCKCHAIR = 'https://api.blockchair.com/bitcoin-sv'
+const sleep    = ms => new Promise(r => setTimeout(r, ms))
+const ONCE     = process.argv.includes('--once')
 const ORCH_ONLY = process.argv.includes('--orch')
-const INTERVAL_MS = 30_000
+const INTERVAL_MS = 60_000   // 60s between full refreshes (reduces rate-limit pressure)
 
 // ── Load wallets ─────────────────────────────────────────────────────────────
 
@@ -55,82 +57,100 @@ const WALLETS = [
   { file: '.env.labeler10',    label: 'JADE  (L10)',  isOrch: false },
 ]
 
-// ── WoC fetch helpers (with 429 retry + GorillaPool fallback) ────────────────
+// ── Multi-API fetch with caching ──────────────────────────────────────────────
 
-async function wocFetch(url, retries = 4) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(15_000) })
-      if (r.ok) return r.json()
-      if (r.status === 429) {
-        const wait = (i + 1) * 1500
-        process.stdout.write(`  [rate-limited, retrying in ${wait}ms]\r`)
-        await sleep(wait)
-        continue
-      }
-      throw new Error(`WoC ${r.status}`)
-    } catch (e) {
-      if (i === retries - 1) throw e
-      await sleep(800)
-    }
-  }
-  throw new Error('WoC: max retries exceeded')
+// address → { utxos, bal, source, ts }
+const dataCache = new Map()
+
+async function quickFetch(url, ms = 10_000) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(ms) })
+  if (r.status === 429) { const e = new Error('429'); e.is429 = true; throw e }
+  if (!r.ok) throw new Error(`HTTP ${r.status}`)
+  return r.json()
 }
 
-async function fetchUtxos(address) {
-  return wocFetch(`${WOC}/address/${address}/unspent`)
+// Normalize any UTXO array into [{height, value}]
+function normalizeUtxos(raw) {
+  const arr = Array.isArray(raw) ? raw : (raw?.utxos ?? raw?.data ?? [])
+  return arr.map(u => ({
+    height: u.height ?? u.block_height ?? (u.confirmations > 0 ? 1 : 0),
+    value:  u.value  ?? u.satoshis ?? 0,
+  }))
 }
 
-async function fetchBalance(address) {
-  // Try WoC first, fall back to GorillaPool for balance
+async function fetchWalletData(address) {
+  // ── 1. WoC ──────────────────────────────────────────────────────────────────
   try {
-    return await wocFetch(`${WOC}/address/${address}/balance`)
-  } catch {
-    try {
-      const r = await fetch(
-        `https://v3.ordinals.gorillapool.io/utxos/${address}?bsv20=false`,
-        { signal: AbortSignal.timeout(10_000) }
-      )
-      if (!r.ok) throw new Error('GP fail')
-      const data = await r.json()
-      const rows = Array.isArray(data) ? data : (data?.utxos ?? data?.data ?? [])
-      const total = rows.reduce((s, u) => s + (u.satoshis ?? u.value ?? 0), 0)
-      return { confirmed: total, unconfirmed: 0, _source: 'GorillaPool' }
-    } catch {
-      return null
-    }
+    const [utxosRaw, bal] = await Promise.all([
+      quickFetch(`${WOC}/address/${address}/unspent`),
+      quickFetch(`${WOC}/address/${address}/balance`),
+    ])
+    const result = { utxos: normalizeUtxos(utxosRaw), bal, source: 'WoC', ts: Date.now() }
+    dataCache.set(address, result)
+    return result
+  } catch (e) {
+    if (!e.is429 && !e.message.startsWith('HTTP')) throw e
+    // 429 or server error — fall through to next API
   }
-}
 
-// Get the latest BSV block time — try WoC chain/info, fall back to block height API
-async function fetchLastBlockAge() {
+  await sleep(200)
+
+  // ── 2. Bitails ───────────────────────────────────────────────────────────────
   try {
-    const r = await fetch(`${WOC}/chain/info`, { signal: AbortSignal.timeout(10_000) })
-    if (r.ok) {
-      const info = await r.json()
-      const br = await fetch(`${WOC}/block/hash/${info.bestblockhash}`, { signal: AbortSignal.timeout(10_000) })
-      if (br.ok) {
-        const block = await br.json()
-        const ageSecs = Math.floor(Date.now() / 1000) - block.time
-        return { height: info.blocks, ageSecs }
-      }
-    }
+    const [utxosRaw, bal] = await Promise.all([
+      quickFetch(`${BITAILS}/address/${address}/unspent`),
+      quickFetch(`${BITAILS}/address/${address}/balance`),
+    ])
+    const result = { utxos: normalizeUtxos(utxosRaw), bal, source: 'Bitails', ts: Date.now() }
+    dataCache.set(address, result)
+    return result
   } catch {}
-  // Fallback: blockchair
+
+  await sleep(200)
+
+  // ── 3. Blockchair (balance only — no UTXO depth info) ───────────────────────
   try {
-    const r = await fetch('https://api.blockchair.com/bitcoin-sv/stats', { signal: AbortSignal.timeout(10_000) })
-    if (r.ok) {
-      const j = await r.json()
-      const ageSecs = Math.floor(Date.now() / 1000) - j.data?.best_block_time_unix
-      return { height: j.data?.blocks, ageSecs: isNaN(ageSecs) ? null : ageSecs }
+    const j = await quickFetch(`${BLOCKCHAIR}/addresses/balances?addresses=${address}`)
+    const sats = j?.data?.[address] ?? 0
+    const result = {
+      utxos: null,   // no UTXO detail from Blockchair
+      bal: { confirmed: sats, unconfirmed: 0 },
+      source: 'Blockchair',
+      ts: Date.now(),
     }
+    dataCache.set(address, result)
+    return result
+  } catch {}
+
+  // ── 4. Return cached data (show as stale) ────────────────────────────────────
+  const cached = dataCache.get(address)
+  if (cached) return { ...cached, stale: true }
+
+  return null   // no data at all
+}
+
+// ── Block age ─────────────────────────────────────────────────────────────────
+
+async function fetchLastBlockAge() {
+  // WoC
+  try {
+    const info = await quickFetch(`${WOC}/chain/info`)
+    const block = await quickFetch(`${WOC}/block/hash/${info.bestblockhash}`)
+    return { height: info.blocks, ageSecs: Math.floor(Date.now() / 1000) - block.time, source: 'WoC' }
+  } catch {}
+  // Blockchair
+  try {
+    const j = await quickFetch(`${BLOCKCHAIR}/stats`)
+    const ageSecs = Math.floor(Date.now() / 1000) - j.data?.best_block_time_unix
+    if (!isNaN(ageSecs)) return { height: j.data?.blocks, ageSecs, source: 'Blockchair' }
   } catch {}
   return null
 }
 
-// ── Analysis helpers ──────────────────────────────────────────────────────────
+// ── Formatting ────────────────────────────────────────────────────────────────
 
 function fmtSats(n) {
+  if (n >= 1e8)  return (n / 1e8).toFixed(3) + ' BSV'
   if (n >= 1e6)  return (n / 1e6).toFixed(2) + 'M'
   if (n >= 1e3)  return (n / 1e3).toFixed(1) + 'k'
   return String(n)
@@ -142,19 +162,23 @@ function fmtAge(secs) {
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`
 }
 
+function fmtStale(ts) {
+  const m = Math.round((Date.now() - ts) / 60_000)
+  return m < 1 ? '(stale <1m)' : `(stale ${m}m)`
+}
+
 function utxoHealth(utxos) {
+  if (!utxos) return { confirmed: '?', unconfirmed: '?', total: '?', risk: 'UNKN' }
   const confirmed   = utxos.filter(u => u.height > 0).length
   const unconfirmed = utxos.filter(u => u.height === 0).length
   const total = utxos.length
-  // Risk = if all UTXOs are unconfirmed, they're all in mempool chains
-  // and could all be at depth ~20 depending on how many payments have been made
   const risk = confirmed === 0 && total > 0 ? 'HIGH' :
                confirmed < 5  && total > 0 ? 'MED'  : 'OK'
   return { confirmed, unconfirmed, total, risk }
 }
 
 function riskIcon(risk) {
-  return risk === 'HIGH' ? '🔴' : risk === 'MED' ? '🟡' : '🟢'
+  return risk === 'HIGH' ? '🔴' : risk === 'MED' ? '🟡' : risk === 'OK' ? '🟢' : '⚪'
 }
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────
@@ -165,91 +189,68 @@ async function snapshot() {
   console.log(`\n⚡ MESA Run Status — ${now}`)
   console.log('═'.repeat(70))
 
-  // Block age
   const blockInfo = await fetchLastBlockAge()
   if (blockInfo) {
-    const { height, ageSecs } = blockInfo
-    const waitNote = ageSecs > 600 ? ` ← ⚠ overdue!` : ageSecs > 300 ? ` ← due soon` : ''
-    const eta = Math.max(0, Math.round((600 - ageSecs) / 60))
-    console.log(`  Last block:  #${height}  (${fmtAge(ageSecs)})${waitNote}`)
-    console.log(`  Next block:  ~${eta}m away  |  depth resets at next block`)
+    const { height, ageSecs, source } = blockInfo
+    const warn = ageSecs > 600 ? ' ← ⚠ overdue!' : ageSecs > 300 ? ' ← due soon' : ''
+    const eta  = Math.max(0, Math.round((600 - ageSecs) / 60))
+    console.log(`  Block #${height}  ${fmtAge(ageSecs)}${warn}   (~${eta}m to next)   [${source}]`)
   } else {
-    console.log(`  Last block:  (WoC unavailable — rate limited or offline)`)
+    console.log(`  Last block: (all APIs unavailable)`)
   }
   console.log()
 
   const wallets = ORCH_ONLY ? WALLETS.filter(w => w.isOrch) : WALLETS
 
-  console.log(`  ${'WALLET'.padEnd(16)} ${'BAL'.padStart(9)}  ${'CONF'.padStart(5)}  ${'UNCONF'.padStart(6)}  ${'TOTAL'.padStart(5)}  RISK  SOURCE`)
-  console.log('  ' + '─'.repeat(72))
+  console.log(`  ${'WALLET'.padEnd(16)} ${'BALANCE'.padStart(10)}  ${'CONF'.padStart(5)}  ${'UNCONF'.padStart(6)}  ${'TOTAL'.padStart(5)}  RISK  SOURCE`)
+  console.log('  ' + '─'.repeat(74))
 
-  let orchConfirmed = 0
-  let orchTotal = 0
-  let anyError = false
+  let orchConfirmed = 0, orchTotal = 0
 
   for (const { file, label, isOrch } of wallets) {
     const key = loadKey(file)
-    if (!key) {
-      console.log(`  ${label.padEnd(16)} ⚠ missing .env`)
-      continue
-    }
+    if (!key) { console.log(`  ${label.padEnd(16)} ⚠ missing .env`); continue }
+
     const address = keyToAddress(key)
-    let utxos = null, bal = null, errMsg = null
+    const data = await fetchWalletData(address)
+    await sleep(500)   // pace requests
 
-    try { utxos = await fetchUtxos(address) } catch (e) { errMsg = e.message }
-    await sleep(350)
-    if (!errMsg) {
-      try { bal = await fetchBalance(address) } catch (e) { errMsg = e.message }
-      await sleep(350)
-    }
-
-    if (errMsg) {
-      anyError = true
-      console.log(`  ${label.padEnd(16)} ⚠ ${errMsg}`)
+    if (!data) {
+      console.log(`  ${label.padEnd(16)} ✗ all APIs failed — no cached data`)
       continue
     }
 
+    const { utxos, bal, source, stale, ts } = data
     const { confirmed, unconfirmed, total, risk } = utxoHealth(utxos)
     const totalSats = bal ? (bal.confirmed || 0) + (bal.unconfirmed || 0) : 0
-    const source = bal?._source ?? 'WoC'
+    const staleTag  = stale ? ` ${fmtStale(ts)}` : ''
+    const srcLabel  = `${source}${staleTag}`
 
-    if (isOrch) { orchConfirmed = confirmed; orchTotal = total }
+    if (isOrch && typeof confirmed === 'number') { orchConfirmed = confirmed; orchTotal = total }
 
     const riskStr = `${riskIcon(risk)} ${risk}`
     console.log(
-      `  ${label.padEnd(16)} ${fmtSats(totalSats).padStart(9)}  ` +
+      `  ${label.padEnd(16)} ${fmtSats(totalSats).padStart(10)}  ` +
       `${String(confirmed).padStart(5)}  ${String(unconfirmed).padStart(6)}  ` +
-      `${String(total).padStart(5)}  ${riskStr.padEnd(8)}  ${source}`
+      `${String(total).padStart(5)}  ${riskStr.padEnd(8)}  ${srcLabel}`
     )
   }
 
   console.log()
 
-  // Summary / advice
-  if (orchTotal > 0) {
+  if (orchTotal !== 0) {
     if (orchConfirmed === 0) {
-      console.log(`  ⚠ ORCHESTRATOR: 0 confirmed UTXOs — all ${orchTotal} are unconfirmed mempool chains.`)
-      console.log(`     CHAIN_DEPTH_LIMIT active — waiting for a block will restore capacity.`)
-      if (blockInfo) {
-        const eta = Math.max(0, Math.round((600 - blockInfo.ageSecs) / 60))
-        console.log(`     Block expected in ~${eta} min.`)
-      }
+      console.log(`  ⚠ ORCHESTRATOR: 0 confirmed UTXOs — all ${orchTotal} unconfirmed (depth limit risk).`)
+      if (blockInfo) console.log(`     Next block in ~${Math.max(0, Math.round((600 - blockInfo.ageSecs) / 60))}m will reset depth.`)
     } else if (orchConfirmed < 10) {
-      console.log(`  ⚠ ORCHESTRATOR: only ${orchConfirmed} confirmed UTXOs — approaching depth limit.`)
+      console.log(`  ⚠ ORCHESTRATOR: only ${orchConfirmed} confirmed UTXOs — approaching limit.`)
     } else {
-      console.log(`  ✓ ORCHESTRATOR: ${orchConfirmed} confirmed UTXOs — healthy, payments flowing.`)
+      console.log(`  ✓ ORCHESTRATOR: ${orchConfirmed} confirmed / ${orchTotal} total UTXOs — healthy.`)
     }
   }
 
-  if (anyError) {
-    console.log(`  ℹ Some wallets hit WoC rate limits — data may be partial. Will retry next cycle.`)
-    console.log(`    Tip: run with --orch flag to check just the orchestrator (fewer API calls).`)
-  }
-
   console.log()
-  if (!ONCE) {
-    console.log(`  (refreshing every ${INTERVAL_MS / 1000}s — Ctrl+C to stop)`)
-  }
+  if (!ONCE) console.log(`  (refreshing every ${INTERVAL_MS / 1000}s — Ctrl+C to stop)`)
   console.log()
 }
 
@@ -263,3 +264,4 @@ if (ONCE) {
     await sleep(INTERVAL_MS)
   }
 }
+
